@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+*.xcodeproj
+.DS_Store
+Package.resolved
+references/*
+!references/README.md
+.testservers/
+.build-linux/
