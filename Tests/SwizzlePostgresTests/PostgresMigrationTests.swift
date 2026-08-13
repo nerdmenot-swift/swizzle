@@ -247,7 +247,7 @@ struct PostgresMigrationTests {
 }
 
 enum PostgresFixture {
-    static let url = "postgres://swizzle:swizzlepass@127.0.0.1:5432/swizzle_test?sslmode=require"
+    static let url = PostgresTestServer.url
 
     static var isAvailable: Bool {
         let semaphore = DispatchSemaphore(value: 0)

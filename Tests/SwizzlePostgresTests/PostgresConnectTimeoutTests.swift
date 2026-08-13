@@ -59,7 +59,7 @@ struct PostgresConnectTimeoutTests {
     @Test("the timeout does not interfere with a reachable server")
     func reachableServerStillConnects() async throws {
         var configuration = try PostgresConnectionConfiguration(
-            swizzleURL: "postgres://swizzle:swizzlepass@127.0.0.1:5432/swizzle_test?sslmode=require"
+            swizzleURL: PostgresTestServer.url
         )
         configuration.connectTimeout = .seconds(5)
 
@@ -198,7 +198,9 @@ struct PostgresURLTrustRootTests {
         guard FileManager.default.fileExists(atPath: certificate) else {
             Issue.record("fixture has no certificate at \(certificate)"); return
         }
-        let base = "postgres://swizzle:swizzlepass@127.0.0.1:5432/swizzle_test"
+        // Without the query string, because this test appends its own `sslmode`
+        // and certificate parameters.
+        let base = PostgresTestServer.baseURL
 
         // The control. Without it a permissive `verify-ca` would make the next
         // assertion pass for the wrong reason.

@@ -14,7 +14,7 @@ import Testing
 )
 struct PostgresQueryAnalyzerTests {
 
-    static let url = "postgres://swizzle:swizzlepass@127.0.0.1:5432/swizzle_test?sslmode=require"
+    static let url = PostgresTestServer.url
 
     /// Fixtures live in their own schema so they cannot collide with the
     /// migration suite's tables, and so dropping them is one statement.

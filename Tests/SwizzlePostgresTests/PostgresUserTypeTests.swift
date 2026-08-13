@@ -17,7 +17,7 @@ import Testing
 )
 struct PostgresUserTypeTests {
 
-    static let url = "postgres://swizzle:swizzlepass@127.0.0.1:5432/swizzle_test?sslmode=require"
+    static let url = PostgresTestServer.url
 
     static let schema = """
         DROP SCHEMA IF EXISTS usertypes CASCADE;

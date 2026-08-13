@@ -40,8 +40,16 @@ enum PostgresTestServer {
     /// certificate is self-signed, and these suites are testing everything
     /// *except* the trust chain. `PostgresURLTrustRootTests` is where the
     /// verifying rungs are exercised.
-    static let url =
-        "postgres://swizzle:swizzlepass@127.0.0.1:5432/swizzle_test?sslmode=require"
+    static let url = "\(baseURL)?sslmode=require"
+
+    /// The same fixture with no query string, for the handful of tests that
+    /// append their own parameters.
+    ///
+    /// These are the credentials `./Scripts/test-servers.sh` seeds into a
+    /// loopback-only server, so they are fixture data rather than secrets — but
+    /// they live in **one** place so that stays a deliberate statement instead of
+    /// nineteen copies nobody is counting.
+    static let baseURL = "postgres://swizzle:swizzlepass@127.0.0.1:5432/swizzle_test"
 
     /// Computed once. A probe per suite would be a syscall per suite, and the
     /// answer cannot change mid-run in any way worth handling.

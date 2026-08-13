@@ -227,3 +227,34 @@ time — the suite had grown roughly fourfold underneath it.
 Only the first is a bug in the library. The other two are bugs in the
 *verification*, which is the same pattern the driver audits kept turning up: the
 code was fine and the thing checking it was not.
+
+## CI
+
+`.github/workflows/ci.yml`, on every push and pull request:
+
+| job | what it proves |
+|---|---|
+| `linux` | builds and tests on glibc, plus `test-hygiene.sh` |
+| `musl` (aarch64, x86_64) | the static SDK still links — no glibc-shaped symbol crept in |
+| `macos` | the Darwin halves of every `#if canImport(Darwin)`, plus the 17 compile-error gates |
+
+Locally, `./Scripts/linux-tests.sh` runs the Linux job's core in the same
+container image.
+
+The static SDK is installed with a **pinned checksum**. `--checksum` is optional
+and the install works without it, which would mean a 300 MB unverified download
+on every run.
+
+Verified to build on Swift 6.1 as well as 6.3.3, so the macOS runner's default
+toolchain lagging behind is not a problem.
+
+### What CI does not cover
+
+The integration suites — anything needing MySQL, MariaDB or Postgres. They skip,
+because `./Scripts/test-servers.sh` starts native binaries bound to the host's
+loopback and CI has no equivalent. That is ~590 of 1375 tests, and it means **the
+protocol work is only ever verified on a developer machine**.
+
+Stated plainly rather than left implicit: it is the largest remaining hole in the
+verification story, and closing it means running the fixtures inside the CI
+network namespace.

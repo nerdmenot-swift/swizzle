@@ -1,0 +1,98 @@
+name: CI
+
+# Why this exists
+#
+# Every verification for a long stretch of this project's life was one person on
+# one machine: macOS, arm64. That is how `stderr` — a global `var` in glibc, and
+# therefore off limits to a `@Sendable` closure under Swift 6 — sat in the tree
+# as a build-breaking failure on Linux while compiling cleanly on macOS *and* on
+# both static-musl cross-builds. The platform record claimed "359 tests pass" on
+# Linux; the suite had grown to 1375 underneath it.
+#
+# So the point of this file is narrow and specific: make the claims in
+# `docs/platforms.md` re-check themselves.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux glibc
+    runs-on: ubuntu-latest
+    # Pinned to the toolchain developed against, so a failure here is the
+    # platform rather than a version difference.
+    container: swift:6.3.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build --build-tests
+
+      # The MySQL and Postgres suites skip: they need the fixtures from
+      # ./Scripts/test-servers.sh, which are not running here. What does run is
+      # every state machine, every codec, the query builder and the whole SQLite
+      # suite — around 780 of the 1375, and the portion where a platform
+      # difference actually shows up.
+      #
+      # Those suites *skipping* rather than failing is itself load-bearing, and
+      # is what `test-hygiene.sh` below enforces.
+      - name: Test
+        run: swift test
+
+      - name: Test hygiene
+        run: ./Scripts/test-hygiene.sh
+
+  musl:
+    name: Static musl (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    container: swift:6.3.3
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, x86_64]
+    env:
+      SDK_URL: https://download.swift.org/swift-6.3.3-release/static-sdk/swift-6.3.3-RELEASE/swift-6.3.3-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz
+      # Pinned, not optional. `--checksum` can be omitted and the install still
+      # works, which would mean a 300 MB unverified download on every run — and
+      # this project is careful about provenance everywhere else.
+      # Recompute with: swift package compute-checksum <bundle>
+      SDK_CHECKSUM: 87c3eaf908e67c0e13a84367119e12273cec1d2cd3d81f7d74bb36722d6b607b
+    steps:
+      - uses: actions/checkout@v4
+
+      # The static SDK links musl rather than glibc, so anything reaching for a
+      # glibc-shaped symbol fails here and not in production. It is also the one
+      # configuration that produces a binary with no runtime dependencies.
+      - name: Install the static Linux SDK
+        run: swift sdk install "$SDK_URL" --checksum "$SDK_CHECKSUM"
+
+      - name: Build
+        run: swift build --swift-sdk ${{ matrix.arch }}-swift-linux-musl
+
+  macos:
+    name: macOS
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build --build-tests
+
+      # Same skipping behaviour as Linux — no fixtures here either. The macOS job
+      # earns its place by covering the Darwin-only halves of the `#if
+      # canImport(Darwin)` branches, which the Linux jobs never compile.
+      - name: Test
+        run: swift test
+
+      # Compile-error gates: the central claim of the builder's design is that
+      # `.returning()` on MySQL cannot be *written*, and that can only be checked
+      # by compiling snippets out of band and asserting they fail.
+      - name: Capability gating must be compile-time
+        run: ./Scripts/negative-tests.sh

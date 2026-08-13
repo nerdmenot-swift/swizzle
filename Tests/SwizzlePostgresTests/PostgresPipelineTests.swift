@@ -11,7 +11,7 @@ import Testing
 )
 struct PostgresPipelineTests {
 
-    static let url = "postgres://swizzle:swizzlepass@127.0.0.1:5432/swizzle_test?sslmode=require"
+    static let url = PostgresTestServer.url
 
     static func open() async throws -> PostgresConnection {
         try await PostgresConnection.connect(
