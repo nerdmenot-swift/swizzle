@@ -2,6 +2,20 @@ public protocol SQLDialect: Sendable {
     static var dialectName: String { get }
     static var identifierQuote: Character { get }
     static func writePlaceholder(index: Int, into sql: inout String)
+
+    /// What goes between `INSERT` and `INTO` to ignore duplicates, including its
+    /// trailing space. Empty for a dialect that does not offer it.
+    ///
+    /// A property rather than a branch in the renderer, and that is the whole
+    /// point of it existing. The renderer used to write
+    /// `D.dialectName == "sqlite" ? "OR IGNORE " : "IGNORE "` — the only place in
+    /// shared code that compared a dialect *by name*. Two ways for that to be
+    /// wrong: a fourth dialect conforming to ``SupportsInsertIgnore`` silently
+    /// got MySQL's spelling, and renaming a dialect changed the SQL it emits.
+    ///
+    /// `INSERT OR IGNORE` is a syntax error on MySQL and `INSERT IGNORE` is one
+    /// on SQLite, so a silently wrong spelling is a statement that does not run.
+    static var insertIgnoreClause: String { get }
 }
 
 extension SQLDialect {
@@ -11,6 +25,11 @@ extension SQLDialect {
         sql.append(name)
         sql.append(identifierQuote)
     }
+
+    /// The MySQL spelling, which is the majority one. A dialect that spells it
+    /// differently — SQLite — says so, and one that cannot do it at all simply
+    /// never conforms to ``SupportsInsertIgnore``, so this is unreachable there.
+    public static var insertIgnoreClause: String { "IGNORE " }
 }
 
 // MARK: - Capability protocols
@@ -64,6 +83,8 @@ public enum SQLite: SQLDialect, SupportsReturning, SupportsOnConflict, SupportsI
                     SupportsFullOuterJoin, SupportsNullsOrdering {
     public static let dialectName = "sqlite"
     public static let identifierQuote: Character = "\""
+    /// `INSERT OR IGNORE`, not `INSERT IGNORE` — the latter is a syntax error here.
+    public static let insertIgnoreClause = "OR IGNORE "
     @inlinable
     public static func writePlaceholder(index: Int, into sql: inout String) {
         sql.append("?")

@@ -394,11 +394,13 @@ extension SQLRenderer {
     /// unreachable through the typed builder either way.
     public mutating func renderInsert(_ core: SQLInsertCore) {
         write("INSERT ")
-        // MySQL and SQLite spell "ignore duplicates" differently, and this is
-        // the one place the two must not be conflated: `INSERT OR IGNORE` is a
-        // syntax error on MySQL and `INSERT IGNORE` is one on SQLite.
+        // The spelling comes from the dialect. This used to compare
+        // `D.dialectName == "sqlite"`, which was the only place shared code
+        // branched on a dialect by name — and therefore the only place a fourth
+        // dialect could be silently mis-rendered. See
+        // ``SQLDialect/insertIgnoreClause``.
         if core.ignoreDuplicates {
-            write(D.dialectName == "sqlite" ? "OR IGNORE " : "IGNORE ")
+            write(D.insertIgnoreClause)
         }
         write("INTO ")
         identifier(core.table)

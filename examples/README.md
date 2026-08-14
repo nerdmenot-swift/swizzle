@@ -34,6 +34,20 @@ long-running transaction.
 A large backfill inside a migration is an anti-pattern regardless of language,
 and the doc says so at length.
 
+## Running them
+
+`Runner.swift` shows the wiring, and it is the piece that was missing: the
+prebuilt `swizzle` CLI **cannot run Swift migrations**, because your migrations
+are Swift code and a binary compiled before your code existed cannot contain it.
+goose has the same constraint and the same answer — its
+`examples/go-migrations/main.go` opens with *"This is custom goose binary"*. You
+link the library into a small binary of your own.
+
+It goes through `SQLiteEngine.connect(url:)` rather than `SQLiteConnection(path:)`
+for a reason worth knowing: SQLite has no advisory locks, so its migration lock is
+a *table*, and `connect` is what creates it. MySQL and Postgres need no such
+thing. Writing this example the low-level way hit exactly that wall.
+
 ## These are checked
 
 An example that no longer works is worse than no example, because it is the first
@@ -44,6 +58,9 @@ thing a newcomer copies.
 - The SQL files are parsed by the real parser in
   `Tests/SwizzleMigrateTests/ExampleMigrationTests.swift`, which asserts what
   each directive does.
+- The runner is **executed** in `Tests/SwizzleSQLiteTests/ExampleRunnerTests.swift`:
+  two SQL migrations and two Swift ones, one journal, applied in version order,
+  against a real database. Compiling is not the same as working.
 
 Both caught something while being written. Deleting `NoTransaction` from
 `00003` fails the suite, as it should. Deleting `StatementBegin`/`StatementEnd`

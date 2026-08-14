@@ -343,7 +343,12 @@ let package = Package(
         // same way, as part of its module rather than as loose files.
         .target(
             name: "SwizzleExamples",
-            dependencies: ["SwizzleMigrate", "SwizzleCore"],
+            dependencies: [
+                "SwizzleMigrate", "SwizzleCore",
+                // A real engine, so the runner example is wired to something
+                // that exists rather than to a sketch.
+                "SwizzleSQLite", "SwizzleSQLiteEngine",
+            ],
             path: "examples/swift-migrations"
         ),
         .testTarget(name: "SwizzleTests", dependencies: ["Swizzle"]),
