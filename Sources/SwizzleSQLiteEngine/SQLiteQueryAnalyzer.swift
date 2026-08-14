@@ -1,5 +1,6 @@
 import Foundation
 import SwizzleCore
+import SwizzleSQLite
 import SwizzleMigrate
 
 /// Describes statements against a real SQLite database.

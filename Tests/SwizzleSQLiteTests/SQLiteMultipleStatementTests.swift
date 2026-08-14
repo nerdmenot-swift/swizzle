@@ -3,6 +3,7 @@ import SwizzleMigrate
 import Testing
 
 @testable import SwizzleSQLite
+@testable import SwizzleSQLiteEngine
 
 /// What happens to the SQL after the first statement.
 ///

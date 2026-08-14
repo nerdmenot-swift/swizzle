@@ -2,6 +2,7 @@ import SwizzleCore
 import SwizzleMigrate
 import Testing
 @testable import SwizzleSQLite
+@testable import SwizzleSQLiteEngine
 
 /// The code generator's analysis layer, exercised against a real database.
 ///

@@ -1,5 +1,6 @@
 import SwizzleCore
 import SwizzleSQLite
+import SwizzleSQLiteEngine
 import Testing
 @testable import SwizzleGenerate
 

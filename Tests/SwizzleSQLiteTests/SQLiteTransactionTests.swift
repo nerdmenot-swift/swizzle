@@ -3,6 +3,7 @@ import SwizzleCore
 import Testing
 
 @testable import SwizzleSQLite
+@testable import SwizzleSQLiteEngine
 
 /// Transactions and savepoints.
 ///

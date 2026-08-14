@@ -1,5 +1,6 @@
 import Foundation
 import SwizzleCore
+import SwizzleSQLite
 import SwizzleMigrate
 
 /// SQLite, registered like any other engine.

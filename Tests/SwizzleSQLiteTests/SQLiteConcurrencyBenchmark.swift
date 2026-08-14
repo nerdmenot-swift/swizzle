@@ -1,6 +1,7 @@
 import Foundation
 import SwizzleCore
 @testable import SwizzleSQLite
+@testable import SwizzleSQLiteEngine
 import Testing
 
 /// The measurement `SQLiteReaderPool` exists because of.

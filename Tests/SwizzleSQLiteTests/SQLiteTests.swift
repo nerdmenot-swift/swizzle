@@ -4,6 +4,7 @@ import SwizzleMigrate
 import SwizzleQuery
 import Testing
 @testable import SwizzleSQLite
+@testable import SwizzleSQLiteEngine
 
 /// SQLite needs no server, so unlike MySQL and Postgres these are ordinary unit
 /// tests: `swift test` exercises a real database on every machine, with no

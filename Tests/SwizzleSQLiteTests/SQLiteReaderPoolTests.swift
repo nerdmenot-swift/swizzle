@@ -3,6 +3,7 @@ import SwizzleCore
 import Testing
 
 @testable import SwizzleSQLite
+@testable import SwizzleSQLiteEngine
 
 /// Blocks every participant until all of them have arrived.
 ///

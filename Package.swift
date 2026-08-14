@@ -11,6 +11,7 @@ let package = Package(
         .library(name: "SwizzleOnlineDDL", targets: ["SwizzleOnlineDDL"]),
         .library(name: "SwizzleMySQLEngine", targets: ["SwizzleMySQLEngine"]),
         .library(name: "SwizzleSQLite", targets: ["SwizzleSQLite"]),
+        .library(name: "SwizzleSQLiteEngine", targets: ["SwizzleSQLiteEngine"]),
         .library(name: "SwizzlePostgres", targets: ["SwizzlePostgres"]),
         .executable(name: "swizzle", targets: ["SwizzleCLI"]),
     ],
@@ -95,7 +96,7 @@ let package = Package(
         ),
         .testTarget(
             name: "SwizzleGenerateTests",
-            dependencies: ["SwizzleGenerate", "SwizzleSQLite", "SwizzleCore"]
+            dependencies: ["SwizzleGenerate", "SwizzleSQLite", "SwizzleSQLiteEngine", "SwizzleCore"]
         ),
 
         // Postgres, ours. Replaces postgres-nio, whose access control blocked
@@ -104,7 +105,7 @@ let package = Package(
         .target(
             name: "SwizzlePostgresDriver",
             dependencies: [
-                "SwizzleCore", "SwizzleQuery", "SwizzleConnectionPool",
+                "SwizzleCore", "SwizzleConnectionPool",
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
@@ -127,15 +128,29 @@ let package = Package(
             ]
         ),
 
-        // SQLite. In-process, so there is no driver to speak of — the whole
-        // engine is a wrapper over libsqlite3 and the same four seams.
+        // SQLite, the driver: connection, values, errors, the reader pool,
+        // transactions. `CSQLite` and `SwizzleCore` and nothing else — the same
+        // rule the other two drivers follow, so it can be lifted out as a
+        // standalone package without dragging the migrator with it.
         .target(
             name: "SwizzleSQLite",
-            dependencies: ["CSQLite", "SwizzleCore", "SwizzleQuery", "SwizzleMigrate"]
+            dependencies: ["CSQLite", "SwizzleCore"]
+        ),
+
+        // SQLite, the engine seam: migration dialect, query analyzer, shadow
+        // database. Split out because it needs `SwizzleMigrate` and the driver
+        // does not — the same split MySQL and Postgres already had, which SQLite
+        // was the odd one out in lacking.
+        .target(
+            name: "SwizzleSQLiteEngine",
+            dependencies: ["SwizzleSQLite", "SwizzleMigrate", "SwizzleCore"]
         ),
         .testTarget(
             name: "SwizzleSQLiteTests",
-            dependencies: ["SwizzleSQLite", "SwizzleMigrate", "SwizzleQuery", "SwizzleCore"]
+            dependencies: [
+                "SwizzleSQLite", "SwizzleSQLiteEngine", "SwizzleMigrate",
+                "SwizzleQuery", "SwizzleCore",
+            ]
         ),
 
         // Postgres, the engine seam: URL parsing, executor, introspector,
@@ -166,6 +181,7 @@ let package = Package(
                 "SwizzleMigrate",
                 "SwizzleMySQLEngine",
                 "SwizzleSQLite",
+                "SwizzleSQLiteEngine",
                 "SwizzleGenerate",
                 "SwizzlePostgres",
                 "SwizzleCore",
@@ -294,7 +310,6 @@ let package = Package(
             name: "SwizzleMySQL",
             dependencies: [
                 "SwizzleCore",
-                "SwizzleQuery",
                 "SwizzleConnectionPool",
                 "CZlib",
                 "CZstd",

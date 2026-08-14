@@ -1,5 +1,6 @@
 import Foundation
 import SwizzleCore
+import SwizzleSQLite
 import SwizzleMigrate
 
 /// SQLite as a migration dialect.

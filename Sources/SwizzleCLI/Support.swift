@@ -5,6 +5,7 @@ import SwizzleCore
 import SwizzleMigrate
 import SwizzleMySQLEngine
 import SwizzleSQLite
+import SwizzleSQLiteEngine
 import SwizzlePostgres
 
 // MARK: - Options shared by every migrate subcommand

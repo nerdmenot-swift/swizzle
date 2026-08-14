@@ -1,6 +1,7 @@
 import SwizzleCore
 import SwizzleMigrate
 import SwizzleSQLite
+@testable import SwizzleSQLiteEngine
 import Testing
 
 /// The claims nothing was checking.

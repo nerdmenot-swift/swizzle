@@ -2,6 +2,7 @@ import Foundation
 import SwizzleCore
 import SwizzleMigrate
 import SwizzleSQLite
+import SwizzleSQLiteEngine
 import Testing
 @testable import SwizzleGenerate
 

@@ -1,6 +1,5 @@
 import NIOCore
 import SwizzleCore
-import SwizzleQuery
 
 /// Runs `SwizzleQuery`-built statements on a MySQL or MariaDB connection.
 ///

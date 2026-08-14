@@ -3,6 +3,7 @@ import SwizzleCore
 import Testing
 
 @testable import SwizzleSQLite
+@testable import SwizzleSQLiteEngine
 
 /// Reading a text column by *length* rather than as a C string.
 ///

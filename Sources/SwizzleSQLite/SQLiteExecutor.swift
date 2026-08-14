@@ -1,5 +1,4 @@
 import SwizzleCore
-import SwizzleQuery
 
 /// Runs `SwizzleQuery`-built statements against a SQLite database.
 ///

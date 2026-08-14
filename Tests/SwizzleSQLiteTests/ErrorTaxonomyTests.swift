@@ -2,6 +2,7 @@ import Foundation
 import SwizzleCore
 import Testing
 @testable import SwizzleSQLite
+@testable import SwizzleSQLiteEngine
 
 /// The error taxonomy, exercised against a real database rather than by
 /// constructing error values by hand.
