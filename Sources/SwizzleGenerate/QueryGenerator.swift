@@ -74,7 +74,7 @@ public struct QueryGenerator: Sendable {
         }
     }
 
-    /// Applies `NotNull` / `Nullable`, and refuses one that names nothing.
+    /// Applies `NotNull` / `Nullable` / `Type`, and refuses one that names nothing.
     ///
     /// A typo in an override is silent otherwise — the column keeps whatever the
     /// engine said, and the author believes they fixed it.
@@ -82,7 +82,9 @@ public struct QueryGenerator: Sendable {
         to columns: [ColumnInfo], from query: ParsedQuery
     ) throws -> [ColumnInfo] {
         let names = Set(columns.map(\.name))
-        for override in query.notNull.union(query.nullable) where !names.contains(override) {
+        let overridden = query.notNull.union(query.nullable)
+            .union(query.types.keys)
+        for override in overridden where !names.contains(override) {
             throw QueryParseError(
                 file: query.file, line: query.line,
                 reason: "query '\(query.name)' has no column '\(override)' to override — "
@@ -98,6 +100,14 @@ public struct QueryGenerator: Sendable {
 
         return columns.map { column in
             var column = column
+            // Applied first, so an explicit `NotNull`/`Nullable` below still wins
+            // over the optionality implied by the spelling.
+            if let declared = query.types[column.name] {
+                column.swiftType = declared.type
+                column.isOptional = declared.isOptional
+                column.nullability = declared.isOptional
+                    ? .annotationNullable : .annotationNotNull
+            }
             if query.notNull.contains(column.name) {
                 column.isOptional = false
                 column.nullability = .annotationNotNull

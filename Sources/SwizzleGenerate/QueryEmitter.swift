@@ -211,10 +211,24 @@ public struct QueryEmitter: Sendable {
             let element = isBareScalar(query)
                 ? typeText(query.signature.columns[0])
                 : rowTypeName(query)
-            // `map` on an AsyncSequence yields an opaque sequence; naming it
-            // `some AsyncSequence<Element, any Error>` keeps the element type
-            // visible to the caller without leaking the driver's own type.
-            return "some AsyncSequence<\(element), any Error>"
+            // The concrete type `map` returns, rather than an opaque
+            // `some AsyncSequence<…>`.
+            //
+            // This emitted `some AsyncSequence<\(element), any Error>` until the
+            // generated code was put in front of a compiler for the first time,
+            // and that does not build on this package's own floor: `Failure` is
+            // the typed-throws associated type, `@available(macOS 15)`, while the
+            // package targets macOS 14. Dropping to one parameter does not work
+            // either — under Swift 6 `AsyncSequence` has two primary associated
+            // types and a constrained existential must supply both — so the
+            // opaque form is simply unavailable below macOS 15.
+            //
+            // Nothing caught it because the only test compared the emitter's
+            // output to a string, which tests that the emitter agrees with
+            // itself. `AsyncThrowingMapSequence` is what the body already
+            // produces, it is as old as `AsyncSequence`, and it still does not
+            // name the driver's type — `Executor.RowSequence` stays abstract.
+            return "AsyncThrowingMapSequence<Executor.RowSequence, \(element)>"
         }
     }
 

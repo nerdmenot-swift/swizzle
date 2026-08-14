@@ -193,6 +193,54 @@ struct LockfileTests {
         )
     }
 
+    /// The same argument as the annotation above, and the one I nearly got wrong:
+    /// the obvious rendering to hash was `SwiftType.sourceText`, which is
+    /// **many-to-one** — `.decimalString`, `.date`, `.uuid`, `.json` and `.string`
+    /// all render `String`. Keying on it would have let `Type total Decimal` →
+    /// `Type total String` slip past `--verify` with the old output still
+    /// committed, in the one check whose entire job is catching that.
+    @Test("a Type change invalidates the key, including between types that render alike")
+    func declaredTypesAreInTheKey() throws {
+        func key(_ text: String) throws -> String {
+            let query = try #require(try Self.parse(text + "\n" + Self.query).first)
+            return Lockfile.key(
+                for: query, engine: "s", schemaFingerprint: "f", generatorVersion: "1"
+            )
+        }
+
+        let plain = try #require(try Self.parse(Self.query).first)
+        let plainKey = Lockfile.key(
+            for: plain, engine: "s", schemaFingerprint: "f", generatorVersion: "1"
+        )
+
+        #expect(try key("-- +swizzle Type email String") != plainKey)
+        // Both emit `String`. Both must still be distinguishable.
+        #expect(try key("-- +swizzle Type email String") != key("-- +swizzle Type email Decimal"))
+        // And so must the optionality, which changes the emitted type on its own.
+        #expect(try key("-- +swizzle Type email String") != key("-- +swizzle Type email String?"))
+    }
+
+    /// A dictionary has no order, so an unsorted rendering would key identically
+    /// written files differently between runs — a lockfile that churns is a
+    /// lockfile people delete.
+    @Test("the key does not depend on the order the types were written in")
+    func declaredTypeOrderDoesNotMatter() throws {
+        let sql = """
+            -- +swizzle Query Two(id: Int64) :one
+            SELECT COUNT(*) AS n, 'x' AS label FROM users WHERE id = ?;
+            """
+        func key(_ directives: String) throws -> String {
+            let query = try #require(try Self.parse(directives + sql).first)
+            return Lockfile.key(
+                for: query, engine: "s", schemaFingerprint: "f", generatorVersion: "1"
+            )
+        }
+        #expect(
+            try key("-- +swizzle Type n Int64\n-- +swizzle Type label String\n")
+                == key("-- +swizzle Type label String\n-- +swizzle Type n Int64\n")
+        )
+    }
+
     // MARK: - On disk
 
     @Test("a lockfile round-trips and is byte-stable")

@@ -67,3 +67,13 @@ Both caught something while being written. Deleting `NoTransaction` from
 from what is now `00004` changed **nothing** — the splitter already handled the
 dollar-quoted body — so that example was demonstrating an escape hatch on a case
 that does not need one. It was rewritten to show the truth instead.
+
+## `codegen/` — the generator
+
+A schema, a query file, the generated Swift and the lockfile, all committed. See
+[`codegen/README.md`](codegen/README.md) and `docs/codegen.md`.
+
+The generated file is in the same build target as the Swift migrations above, for
+the same reason and with one addition: `CodegenGoldenTests` regenerates it and
+diffs, then *runs* the generated functions against a real database. Compiling
+proves the shapes are well formed; it does not prove they return the right rows.

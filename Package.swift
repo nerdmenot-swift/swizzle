@@ -96,7 +96,13 @@ let package = Package(
         ),
         .testTarget(
             name: "SwizzleGenerateTests",
-            dependencies: ["SwizzleGenerate", "SwizzleSQLite", "SwizzleSQLiteEngine", "SwizzleCore"]
+            dependencies: [
+                "SwizzleGenerate", "SwizzleSQLite", "SwizzleSQLiteEngine", "SwizzleCore",
+                "SwizzleMigrate",
+                // The committed generated code in `examples/codegen`, so the
+                // golden suite can *call* it rather than only diff its text.
+                "SwizzleExamples",
+            ]
         ),
 
         // Postgres, ours. Replaces postgres-nio, whose access control blocked
@@ -349,7 +355,27 @@ let package = Package(
                 // that exists rather than to a sketch.
                 "SwizzleSQLite", "SwizzleSQLiteEngine",
             ],
-            path: "examples/swift-migrations"
+            path: "examples",
+            // `sources:` alone still leaves SwiftPM warning about the `.sql`
+            // files it can see and does not know what to do with.
+            exclude: [
+                "README.md", "migrations",
+                "codegen/README.md", "codegen/migrations", "codegen/queries",
+                "codegen/swizzle.lock.json",
+            ],
+            // Named explicitly rather than letting SwiftPM walk `examples/`,
+            // which also holds the `.sql` files the generator reads and the
+            // lockfile it writes. `sources:` makes everything else invisible to
+            // the build instead of needing an `exclude:` that grows with the
+            // directory.
+            //
+            // `codegen/Generated` is committed *generated* code, compiled here
+            // for the reason the emitter exists: the type map produced
+            // `[String]` for a Postgres `text[]` once, which does not compile,
+            // and nothing caught it until generated code was put in front of the
+            // compiler. `CodegenGoldenTests` regenerates it and diffs, so a
+            // change to the emitter cannot quietly leave this behind.
+            sources: ["swift-migrations", "codegen/Generated"]
         ),
         .testTarget(name: "SwizzleTests", dependencies: ["Swizzle"]),
         .testTarget(

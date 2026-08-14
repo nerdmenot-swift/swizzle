@@ -1,3 +1,4 @@
+import Foundation
 import SwizzleCore
 import SwizzleSQLite
 import SwizzleSQLiteEngine
@@ -62,8 +63,52 @@ struct QueryParserTests {
         )
         #expect(queries.map(\.name) == ["A", "B"])
         #expect(queries[1].sql == "DELETE FROM t WHERE k = ?")
-        // The ordinary comment belongs to A's body, not to B.
-        #expect(queries[0].sql.contains("SELECT 1"))
+
+        // The ordinary comment belongs to neither, and this assertion is the
+        // point of the test.
+        //
+        // It used to read `#expect(queries[0].sql.contains("SELECT 1"))`, which
+        // passed while A's SQL was the whole rest of the file — statement,
+        // semicolon and prose. A `contains` check cannot tell "the right SQL"
+        // from "the right SQL and four lines of commentary", so it did not, and
+        // the generated code shipped the commentary to the server.
+        #expect(queries[0].sql == "SELECT 1")
+    }
+
+    /// The general form of the bug above: whatever an author writes after a
+    /// query, up to the next directive, is not part of that query.
+    @Test("prose written after a query does not become part of it")
+    func trailingProseIsNotSQL() throws {
+        let queries = try QueryParser.parse(
+            """
+            -- +swizzle Query A(id: Int64) :one
+            SELECT id FROM users WHERE id = ?;
+
+            -- Why this query exists, at length, with a semicolon; and a ? too.
+            /* and a block comment
+               over several lines */
+            """,
+            filename: "q.sql"
+        )
+        #expect(queries[0].sql == "SELECT id FROM users WHERE id = ?")
+    }
+
+    /// One directive generates one function, so a body holding two statements
+    /// has to be an error — otherwise it silently generates a function that
+    /// sends both.
+    @Test("two statements under one directive are refused")
+    func twoStatementsRefused() {
+        do {
+            _ = try QueryParser.parse(
+                "-- +swizzle Query A :exec\nDELETE FROM t;\nDELETE FROM u;",
+                filename: "q.sql"
+            )
+            Issue.record("expected a parse error")
+        } catch let error as QueryParseError {
+            #expect(error.reason.contains("2 statements"))
+        } catch {
+            Issue.record("wrong error: \(error)")
+        }
     }
 
     @Test("overrides attach to the query that follows them")
@@ -108,6 +153,74 @@ struct QueryParserTests {
 
     /// Two queries with one name would generate two functions with one name.
     /// Caught here so the message names the file, not the generated output.
+    @Test("a Type directive is parsed, with and without its optionality")
+    func typeDirective() throws {
+        let queries = try QueryParser.parse(
+            """
+            -- +swizzle Type n Int64
+            -- +swizzle Type label String?
+            -- +swizzle Query Q :one
+            SELECT COUNT(*) AS n, 'x' AS label FROM users;
+            """,
+            filename: "q.sql"
+        )
+        #expect(queries[0].types["n"] == DeclaredColumnType(type: .int64, isOptional: false))
+        #expect(queries[0].types["label"] == DeclaredColumnType(type: .string, isOptional: true))
+    }
+
+    /// `Int` is what an author reaches for first, and `unknown type 'Int'` would
+    /// be a pointlessly hostile welcome. It generates as `Int64`, which is what
+    /// the emitted code says.
+    @Test("Int is accepted as a spelling of Int64")
+    func intIsAccepted() throws {
+        let queries = try QueryParser.parse(
+            "-- +swizzle Type n Int\n-- +swizzle Query Q :one\nSELECT COUNT(*) AS n FROM users;",
+            filename: "q.sql"
+        )
+        #expect(queries[0].types["n"]?.type == .int64)
+    }
+
+    @Test("a type nothing can emit is refused, and the message lists what can")
+    func unknownTypeIsRefused() {
+        do {
+            _ = try QueryParser.parse(
+                "-- +swizzle Type n BigDecimal\n-- +swizzle Query Q :one\nSELECT 1 AS n;",
+                filename: "q.sql"
+            )
+            Issue.record("expected a parse error")
+        } catch let error as QueryParseError {
+            #expect(error.reason.contains("BigDecimal"))
+            #expect(error.reason.contains("Int64"))
+        } catch {
+            Issue.record("wrong error: \(error)")
+        }
+    }
+
+    @Test("two different types for one column are refused rather than silently resolved")
+    func contradictoryTypes() {
+        #expect(throws: QueryParseError.self) {
+            _ = try QueryParser.parse(
+                """
+                -- +swizzle Type n Int64
+                -- +swizzle Type n String
+                -- +swizzle Query Q :one
+                SELECT 1 AS n;
+                """,
+                filename: "q.sql"
+            )
+        }
+    }
+
+    @Test("a Type with no query after it is refused")
+    func danglingType() {
+        #expect(throws: QueryParseError.self) {
+            _ = try QueryParser.parse(
+                "-- +swizzle Query Q :one\nSELECT 1;\n-- +swizzle Type n Int64\n",
+                filename: "q.sql"
+            )
+        }
+    }
+
     @Test("a duplicate name is refused")
     func duplicateNames() {
         #expect(throws: QueryParseError.self) {
@@ -228,6 +341,111 @@ struct QueryGenerationTests {
         }
     }
 
+    // MARK: - `Type`
+
+    /// The gap this closed, stated as the query that exposed it.
+    ///
+    /// `SELECT COUNT(*)` is the most ordinary query anybody writes, and on SQLite
+    /// it generated as `SQLValue` with no way to say otherwise: `decltype` is null
+    /// for every expression, `NotNull` fixed only the optionality, and the type
+    /// half had no directive at all. Found by running the CLI end to end rather
+    /// than by reading it — the unit tests all used base columns, which are
+    /// exactly the case SQLite *can* type.
+    @Test("a declared type replaces the one the engine could not report")
+    func typeOverrideNamesWhatSQLiteCannot() async throws {
+        let connection = try await Self.connection()
+        defer { connection.close() }
+
+        let unaided = try await resolve(
+            "-- +swizzle Query Q :one\nSELECT COUNT(*) AS n FROM users;", connection
+        )
+        #expect(unaided[0].signature.columns[0].swiftType == .dynamic)
+        #expect(unaided[0].signature.columns[0].isOptional)
+
+        let declared = try await resolve(
+            "-- +swizzle Type n Int64\n-- +swizzle Query Q :one\nSELECT COUNT(*) AS n FROM users;",
+            connection
+        )
+        #expect(declared[0].signature.columns[0].swiftType == .int64)
+        // Not optional, because the author wrote `Int64` and not `Int64?`.
+        #expect(declared[0].signature.columns[0].isOptional == false)
+        #expect(declared[0].signature.columns[0].nullability == .annotationNotNull)
+    }
+
+    /// The whole reason optionality rides on the spelling: one directive, and the
+    /// vocabulary is Swift's rather than ours.
+    @Test("a trailing ? makes the declared type optional")
+    func optionalSpelling() async throws {
+        let connection = try await Self.connection()
+        defer { connection.close() }
+
+        let resolved = try await resolve(
+            "-- +swizzle Type label String?\n-- +swizzle Query Q :many\n"
+                + "SELECT nickname || '!' AS label FROM users;",
+            connection
+        )
+        #expect(resolved[0].signature.columns[0].swiftType == .string)
+        #expect(resolved[0].signature.columns[0].isOptional)
+        #expect(resolved[0].signature.columns[0].nullability == .annotationNullable)
+    }
+
+    /// Applied in that order deliberately, so a `Type` can name the type while a
+    /// separate `NotNull` corrects the optionality.
+    @Test("NotNull still wins over the optionality a Type implied")
+    func notNullBeatsDeclaredOptionality() async throws {
+        let connection = try await Self.connection()
+        defer { connection.close() }
+
+        let resolved = try await resolve(
+            "-- +swizzle Type n Int64?\n-- +swizzle NotNull n\n"
+                + "-- +swizzle Query Q :one\nSELECT COUNT(*) AS n FROM users;",
+            connection
+        )
+        #expect(resolved[0].signature.columns[0].swiftType == .int64)
+        #expect(resolved[0].signature.columns[0].isOptional == false)
+    }
+
+    /// The same protection `NotNull` has: a typo that names nothing is otherwise
+    /// silent, and the author believes they fixed it.
+    @Test("a Type naming no column is refused")
+    func typeMustNameAColumn() async throws {
+        let connection = try await Self.connection()
+        defer { connection.close() }
+
+        do {
+            _ = try await resolve(
+                "-- +swizzle Type totl Int64\n-- +swizzle Query Q :many\nSELECT id FROM users;",
+                connection
+            )
+            Issue.record("expected a parse error")
+        } catch let error as QueryParseError {
+            #expect(error.reason.contains("totl"))
+            #expect(error.reason.contains("'id'"))
+        }
+    }
+
+    @Test("a declared type actually reaches the generated source")
+    func typeReachesTheEmitter() async throws {
+        let connection = try await Self.connection()
+        defer { connection.close() }
+
+        let source = QueryEmitter(options: .init(dialect: "SQLite")).emit(
+            try await resolve(
+                "-- +swizzle Type n Int64\n-- +swizzle Query CountUsers :one\n"
+                    + "SELECT COUNT(*) AS n FROM users;",
+                connection
+            )
+        )
+        // A single non-optional column is returned bare, so the whole signature
+        // is visible in one line — and it is `Int64?` rather than `SQLValue?`,
+        // where the `?` is "at most one row" and not the column.
+        #expect(source.contains("func countUsers() async throws -> Int64?"))
+        #expect(source.contains("try Int64(sqlValue: row.values[0])"))
+        // `[SQLValue]` is the bindings array every function carries, so the
+        // absence being asserted is of `SQLValue` as the *decoded* type.
+        #expect(!source.contains("try SQLValue("))
+    }
+
     @Test("a column cannot be both NotNull and Nullable")
     func contradictoryOverrides() async throws {
         let connection = try await Self.connection()
@@ -326,7 +544,29 @@ struct QueryGenerationTests {
         let source = try await emit("-- +swizzle Query S :stream\nSELECT id, email FROM users;", connection)
 
         #expect(source.contains("extension Queries where Executor: SQLStreamingExecutor"))
-        #expect(source.contains("some AsyncSequence<SRow, any Error>"))
+        #expect(source.contains("AsyncThrowingMapSequence<Executor.RowSequence, SRow>"))
+    }
+
+    /// The limit of every assertion above, stated once.
+    ///
+    /// They compare the emitter's output to strings, which cannot tell valid
+    /// Swift from a plausible-looking sequence of characters. The return type for
+    /// `:stream` read `some AsyncSequence<SRow, any Error>` and matched its
+    /// assertion exactly while not compiling at all below macOS 15 — the second
+    /// parameter is the typed-throws `Failure`, and this package targets 14.
+    ///
+    /// `CodegenGoldenTests` is the answer: `examples/codegen/Generated` is a
+    /// build target, so the compiler sees generated code for every cardinality,
+    /// this one included. Left here as a pointer, because the next person to add
+    /// an emitter test will reach for `contains` first — as I did.
+    @Test("string assertions are not a compiler, and the golden example is")
+    func stringAssertionsAreNotACompiler() {
+        #expect(
+            FileManager.default.fileExists(
+                atPath: CodegenGoldenTests.generatedFile.path
+            ),
+            "examples/codegen/Generated/Queries.swift is what compiles the emitter's output. If it has moved, the emitter is unchecked again."
+        )
     }
 
     /// The generated container is pinned to the dialect it was analysed against,
@@ -350,5 +590,55 @@ struct QueryGenerationTests {
             SELECT nickname FROM users;
             """
         #expect(try await emit(text, connection) == (try await emit(text, connection)))
+    }
+}
+
+/// A test-only shim, because every suite in this module writes SQLite.
+///
+/// Deliberately not a default on the real API: a query file's dialect decides
+/// where its statements end, and a wrong guess is silent — a Postgres `$$ … $$`
+/// body reads as ordinary text to every other scanner. Tests that care about a
+/// different dialect name it, and `PostgresQuerySyntaxTests` below is one.
+extension QueryParser {
+    static func parse(_ text: String, filename: String) throws -> [ParsedQuery] {
+        try parse(text, filename: filename, syntax: .sqlite)
+    }
+}
+
+/// The dialect actually reaching the parser.
+///
+/// Threading a syntax through is only worth anything if it is used, and the case
+/// that proves it is a body the SQLite scanner would misread.
+// test-hygiene: no server — pure parsing
+@Suite("Query file dialects")
+struct PostgresQuerySyntaxTests {
+
+    /// A dollar-quoted body holding a semicolon is one statement to Postgres and
+    /// two to a scanner that does not know the quoting form.
+    @Test("a dollar-quoted body is one statement, not two")
+    func dollarQuoting() throws {
+        let text = """
+            -- +swizzle Query Greet(name: String) :one
+            SELECT format($fmt$hello, %s; and welcome$fmt$, $1) AS greeting;
+            """
+        let postgres = try QueryParser.parse(text, filename: "q.sql", syntax: .postgres)
+        #expect(postgres.count == 1)
+        #expect(postgres[0].sql.contains("and welcome"))
+
+        // The same text under SQLite's rules splits at the semicolon inside the
+        // body — which is exactly the failure the parameter exists to prevent.
+        #expect(throws: QueryParseError.self) {
+            _ = try QueryParser.parse(text, filename: "q.sql", syntax: .sqlite)
+        }
+    }
+
+    /// MySQL's `#` comment, which no other dialect has.
+    @Test("a MySQL hash comment after a query is not part of it")
+    func hashComment() throws {
+        let queries = try QueryParser.parse(
+            "-- +swizzle Query All :many\nSELECT id FROM users;\n# a note\n",
+            filename: "q.sql", syntax: .mysql
+        )
+        #expect(queries[0].sql == "SELECT id FROM users")
     }
 }

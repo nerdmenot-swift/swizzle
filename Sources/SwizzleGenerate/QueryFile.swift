@@ -12,8 +12,42 @@ public struct ParsedQuery: Sendable, Equatable {
     public var notNull: Set<String>
     /// Columns the author asserts may be null.
     public var nullable: Set<String>
+    /// Swift types the author supplies for columns the engine could not type.
+    ///
+    /// The counterpart to ``DeclaredParameter``'s type, and it exists for the same
+    /// reason: on a dynamically typed engine the database genuinely does not know.
+    /// SQLite's `decltype` is null for every expression, so `SELECT COUNT(*)` —
+    /// the most ordinary query anyone writes — has no type to report and lands on
+    /// ``SwiftType/dynamic``. `NotNull` could fix the optionality and nothing
+    /// could fix the type, so an author who knew the answer had no way to say it.
+    public var types: [String: DeclaredColumnType]
     public var file: String
     public var line: Int
+}
+
+/// A column type written out in a query file — `Int64`, or `String?`.
+///
+/// Carries the optionality because the author is naming a **Swift** type, and in
+/// Swift `Int64` and `Int64?` are different types. Making them mean the same
+/// thing and requiring a second directive to choose between them would be a
+/// vocabulary of our own laid over one every reader already knows.
+///
+/// `NotNull` / `Nullable` still apply afterwards and still win, so a column can be
+/// typed in one place and have its optionality corrected in another when that
+/// reads better — usually when the type is fine and only the nullability is not.
+public struct DeclaredColumnType: Sendable, Equatable {
+    public var type: SwiftType
+    public var isOptional: Bool
+
+    public init(type: SwiftType, isOptional: Bool) {
+        self.type = type
+        self.isOptional = isOptional
+    }
+
+    /// How it was written, which is also how the lockfile keys it.
+    public var declaredName: String {
+        type.declaredName + (isOptional ? "?" : "")
+    }
 }
 
 /// A parameter as declared in the query file.
@@ -51,34 +85,75 @@ public struct QueryParseError: Error, Sendable, CustomStringConvertible {
 /// -- +swizzle Query OrderTotals(userID: Int64) :many
 /// SELECT u.id, o.total FROM users u LEFT JOIN orders o ON o.user_id = u.id
 /// WHERE u.id = ?;
+///
+/// -- +swizzle Type n Int64
+/// -- +swizzle Query CountUsers :one
+/// SELECT COUNT(*) AS n FROM users;
 /// ```
+///
+/// `NotNull` / `Nullable` correct the engine's optionality; `Type` supplies a
+/// Swift type the engine could not report at all, optionality included — write
+/// `String?` for a column that may be null. The two directives are separate
+/// because the databases fail at them separately: MySQL and Postgres type an
+/// aggregate perfectly well and only nullability needs help, while SQLite can say
+/// nothing about `COUNT(*)` in either direction.
 ///
 /// Placeholders are the **engine's own** — `?` on MySQL and SQLite, `$1` on
 /// Postgres — rather than a portable invention, for the same reason. A query file
 /// is written against one database, exactly as a migration is.
 public enum QueryParser {
 
-    public static func parse(_ text: String, filename: String) throws -> [ParsedQuery] {
+    /// - Parameter syntax: the dialect's quoting and comment rules, used to find
+    ///   where each query's statement actually ends. Not defaulted, because
+    ///   guessing it wrong is silent: a Postgres file's `$$ … $$` body or a MySQL
+    ///   file's `` `identifier` `` would be misread as ordinary text.
+    public static func parse(
+        _ text: String, filename: String, syntax: SQLStatementSplitter.Syntax
+    ) throws -> [ParsedQuery] {
         var queries: [ParsedQuery] = []
+        let splitter = SQLStatementSplitter(syntax: syntax)
 
         var pendingNotNull: Set<String> = []
         var pendingNullable: Set<String> = []
+        var pendingTypes: [String: DeclaredColumnType] = [:]
         var current: ParsedQuery?
         var body = ""
 
         func finish() throws {
             guard var query = current else { return }
-            let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-            // A trailing semicolon is what makes the file runnable by hand, and
-            // what some engines refuse inside a prepared statement. Kept in the
-            // file, dropped on the way to the server.
-            query.sql = trimmed.hasSuffix(";") ? String(trimmed.dropLast()) : trimmed
-            guard !query.sql.isEmpty else {
+
+            // Split rather than trim, and this is the whole reason the parser
+            // needs a dialect.
+            //
+            // The body is every line between this query's directive and the next
+            // one, which includes any ordinary comment the author wrote *after*
+            // the statement — and a directive block explaining the next query is
+            // written exactly there. Trimming a trailing semicolon left all of it
+            // in the SQL: the generated `listByAuthor` in `examples/codegen`
+            // shipped four lines of prose about `COUNT(*)` to the server, with an
+            // embedded `;` in the middle because the string no longer ended in
+            // one. Found by writing that example, not by reading this.
+            //
+            // The splitter already knows where a statement ends in each dialect —
+            // it is what the migrations run on — so it drops the trailing comment
+            // and the semicolon together, and reports a body holding two
+            // statements instead of silently generating one function for both.
+            let statements = splitter.split(body)
+            guard let statement = statements.first else {
                 throw QueryParseError(
                     file: filename, line: query.line,
                     reason: "query '\(query.name)' has no SQL after its directive"
                 )
             }
+            guard statements.count == 1 else {
+                throw QueryParseError(
+                    file: filename, line: query.line,
+                    reason: "query '\(query.name)' has \(statements.count) statements — "
+                        + "one query generates one function, so give each its own "
+                        + "'-- +swizzle Query' directive"
+                )
+            }
+            query.sql = statement
             queries.append(query)
             current = nil
             body = ""
@@ -100,10 +175,12 @@ public enum QueryParser {
                     name: header.name, sql: "", cardinality: header.cardinality,
                     parameters: header.parameters,
                     notNull: pendingNotNull, nullable: pendingNullable,
+                    types: pendingTypes,
                     file: filename, line: line
                 )
                 pendingNotNull = []
                 pendingNullable = []
+                pendingTypes = [:]
 
             case "NotNull":
                 let column = rest.trimmingCharacters(in: .whitespaces)
@@ -125,20 +202,57 @@ public enum QueryParser {
                 }
                 pendingNullable.insert(column)
 
+            case "Type":
+                let parts = rest.split(
+                    separator: " ", maxSplits: 1, omittingEmptySubsequences: true
+                )
+                guard parts.count == 2 else {
+                    throw QueryParseError(
+                        file: filename, line: line,
+                        reason: "Type needs a column and a Swift type, "
+                            + "e.g. '-- +swizzle Type n Int64'"
+                    )
+                }
+                let column = String(parts[0])
+                let spelling = parts[1].trimmingCharacters(in: .whitespaces)
+                let isOptional = spelling.hasSuffix("?")
+                let bare = isOptional ? String(spelling.dropLast()) : spelling
+                guard let type = SwiftType(declared: bare) else {
+                    throw QueryParseError(
+                        file: filename, line: line,
+                        reason: "unknown type '\(spelling)' for column '\(column)' — "
+                            + "expected one of "
+                            + SwiftType.declarableNames.joined(separator: ", ")
+                            + ", each optionally followed by '?'"
+                    )
+                }
+                let declared = DeclaredColumnType(type: type, isOptional: isOptional)
+                // Two spellings for one column is a mistake with a silent
+                // resolution otherwise: the last one wins and the author is
+                // reading the first.
+                if let existing = pendingTypes[column], existing != declared {
+                    throw QueryParseError(
+                        file: filename, line: line,
+                        reason: "column '\(column)' is given two types — "
+                            + "'\(existing.declaredName)' and '\(spelling)'"
+                    )
+                }
+                pendingTypes[column] = declared
+
             default:
                 throw QueryParseError(
                     file: filename, line: line,
                     reason: "unknown directive '\(keyword)' — "
-                        + "query files understand Query, NotNull and Nullable"
+                        + "query files understand Query, NotNull, Nullable and Type"
                 )
             }
         }
         try finish()
 
-        guard pendingNotNull.isEmpty, pendingNullable.isEmpty else {
+        guard pendingNotNull.isEmpty, pendingNullable.isEmpty, pendingTypes.isEmpty else {
             throw QueryParseError(
                 file: filename, line: text.components(separatedBy: .newlines).count,
-                reason: "NotNull/Nullable at the end of the file applies to no query"
+                reason: "NotNull/Nullable/Type at the end of the file applies to no query"
             )
         }
 
@@ -251,9 +365,16 @@ public enum QueryParser {
 /// Loads every `.sql` file in a directory.
 public struct QueryDirectory: Sendable {
     public let url: URL
+    public let syntax: SQLStatementSplitter.Syntax
 
-    public init(url: URL) { self.url = url }
-    public init(path: String) { self.init(url: URL(fileURLWithPath: path)) }
+    public init(url: URL, syntax: SQLStatementSplitter.Syntax) {
+        self.url = url
+        self.syntax = syntax
+    }
+
+    public init(path: String, syntax: SQLStatementSplitter.Syntax) {
+        self.init(url: URL(fileURLWithPath: path), syntax: syntax)
+    }
 
     public func load() throws -> [ParsedQuery] {
         let manager = FileManager.default
@@ -274,7 +395,9 @@ public struct QueryDirectory: Sendable {
             let text = try String(
                 contentsOf: url.appendingPathComponent(filename), encoding: .utf8
             )
-            queries.append(contentsOf: try QueryParser.parse(text, filename: filename))
+            queries.append(
+                contentsOf: try QueryParser.parse(text, filename: filename, syntax: syntax)
+            )
         }
 
         // Names have to be unique across the whole directory, not just per file,

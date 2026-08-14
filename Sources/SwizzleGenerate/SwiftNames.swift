@@ -138,4 +138,64 @@ extension SwiftType {
         case .unresolved: "SQLValue"
         }
     }
+
+    /// The types an author may name in `-- +swizzle Type <column> <T>`.
+    ///
+    /// The reverse of ``sourceText``, and deliberately **not** derived from it:
+    /// `sourceText` is many-to-one — `.decimalString`, `.date`, `.uuid`, `.json`
+    /// and `.array` all render `String` — so inverting it would have to pick a
+    /// winner. Naming the accepted spellings instead keeps the ambiguity out of
+    /// the table: an author writing `String` means `.string`, and one who wants
+    /// exact-numeric semantics writes `Decimal`.
+    ///
+    /// Ordered rather than a dictionary literal so the error message listing them
+    /// reads in a sensible order rather than a hash one.
+    static let declarable: [(String, SwiftType)] = [
+        ("Int64", .int64), ("Int32", .int32), ("Int16", .int16), ("Int8", .int8),
+        ("UInt64", .uint64),
+        ("Double", .double), ("Float", .float),
+        ("String", .string),
+        ("Bool", .bool),
+        ("[UInt8]", .bytes),
+        ("Decimal", .decimalString),
+        ("Date", .date),
+        ("UUID", .uuid),
+        ("JSON", .json),
+        ("SQLValue", .dynamic),
+    ]
+
+    /// Parses a type named in a query file, or nil if it is not one we can emit.
+    ///
+    /// `Int` is accepted as a spelling of `Int64` because it is what an author
+    /// reaches for first and getting `unknown type 'Int'` for it would be a
+    /// pointlessly hostile welcome. It is not in ``declarable`` because the
+    /// generated code says `Int64`, and offering a spelling the output does not
+    /// use would be its own small lie.
+    public init?(declared name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if trimmed == "Int" {
+            self = .int64
+            return
+        }
+        guard let match = SwiftType.declarable.first(where: { $0.0 == trimmed }) else {
+            return nil
+        }
+        self = match.1
+    }
+
+    /// The accepted spellings, for an error message that says what to write
+    /// instead of only what was wrong.
+    public static var declarableNames: [String] { declarable.map(\.0) }
+
+    /// The spelling an author would write for this type.
+    ///
+    /// Exists because ``sourceText`` **cannot** be used to identify a type:
+    /// `.decimalString`, `.date`, `.uuid`, `.json` and `.string` all render
+    /// `String`, so hashing that into the lockfile key would leave
+    /// `Type total Decimal` → `Type total String` invisible to `--verify` — a
+    /// stale-output hole in the one check that exists to prevent stale output.
+    /// This is injective over every type an author can name.
+    public var declaredName: String {
+        SwiftType.declarable.first { $0.1 == self }?.0 ?? sourceText
+    }
 }

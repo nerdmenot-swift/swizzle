@@ -3,10 +3,27 @@
 Migrations + typed query builder + query cache/executor for Postgres, MySQL/MariaDB
 and SQLite, in one Swift package.
 
-**Status: type-checker spike only.** No drivers, no migrations, no macros yet. What
-exists is enough to answer one question — *can Swift's type system express a
-Drizzle-class query builder without melting the compiler?* — and that question is
-now answered.
+**Status: all three pillars are built.** Migrations, the query builder, and
+code generation, over three drivers written in this repo.
+
+| pillar | state | read |
+|---|---|---|
+| 1. SQL-first migrations | built | [`docs/migrations.md`](docs/migrations.md), [`examples/migrations`](examples/migrations) |
+| 2. Typed query builder — *not* an ORM | built | [`docs/ergonomics.md`](docs/ergonomics.md), [`docs/drizzle-study.md`](docs/drizzle-study.md) |
+| 3. sqlc-style code generation | built | [`docs/codegen.md`](docs/codegen.md), [`examples/codegen`](examples/codegen) |
+
+| driver | state | read |
+|---|---|---|
+| MySQL / MariaDB | ours, including binlog | [`docs/mysql-protocol-checklist.md`](docs/mysql-protocol-checklist.md) |
+| Postgres | ours, replacing postgres-nio | [`docs/postgres-protocol-checklist.md`](docs/postgres-protocol-checklist.md) |
+| SQLite | ours, over the amalgamation | [`docs/sqlite-audit.md`](docs/sqlite-audit.md) |
+
+Not done, and tracked rather than implied: 15 integration failures that appear
+only on Linux ([`docs/platforms.md`](docs/platforms.md)), a thin server-version
+matrix, and no fuzzing of the binlog and JSONB decoders.
+
+The sections below are the original type-checker spike, kept because its results
+are still the reason the builder is shaped the way it is.
 
 ---
 
@@ -104,34 +121,42 @@ has no async/await at all, `onRow` is a push callback with no backpressure hook,
 and it does PREPARE/EXECUTE/CLOSE on every query. Full analysis and the
 alternatives considered are in [`docs/driver-spike.md`](docs/driver-spike.md).
 
-Built so far (36 tests): length-encoded primitives, packet framing including the
-16 MiB split rule in both directions, capability flags as a 64-bit set (MariaDB
-reuses the upper half), HandshakeV10 parsing, and the
-`mysql_native_password` / `caching_sha2_password` scrambles.
+Built: length-encoded primitives, packet framing including the 16 MiB split rule
+in both directions, capability flags as a 64-bit set (MariaDB reuses the upper
+half), the full handshake with TLS, `mysql_native_password`,
+`caching_sha2_password` including RSA full authentication with key pinning,
+`sha256_password`, `client_ed25519`, prepared statements with a reused cache,
+streaming with real backpressure, and binlog replication with a row decoder.
 
 Auth vectors come from `go-sql-driver/mysql`'s test suite rather than being
 self-generated — an external oracle whose outputs are known to authenticate
-against real servers.
+against real servers. The wire protocol is grounded on `rust-mysql-common` and
+`mysql_async`; an audit against them is recorded in
+[`docs/mysql-protocol-checklist.md`](docs/mysql-protocol-checklist.md) and found
+real framing bugs.
 
-`client_ed25519` is deliberately unimplemented and fails with an actionable
-error; see the driver spike doc for why Swift Crypto can't currently express it.
+## What the spike did *not* de-risk, and what happened to each
 
-## What this does *not* de-risk
+The spike deliberately tested the thing most likely to kill the project. It
+wasn't. Here is where the risks it left open actually landed:
 
-The spike deliberately tested the thing I thought was most likely to kill the
-project. It wasn't. The remaining risks are unchanged and mostly not about types:
-
-- **MySQL/MariaDB drivers.** `MySQLNIO` is far less maintained than `PostgresNIO`.
-  `caching_sha2_password`, MariaDB `ed25519` auth, prepared-statement quirks. This
-  is now the top schedule risk.
-- **Macro expansion cost.** `@Table` doesn't exist yet. Macros are slow and a
-  200-table schema is a different measurement than this one. Needs its own spike.
-- **No network in macro plugins.** A sqlc-style `#sql("SELECT …")` cannot introspect
-  a live DB at compile time. Planned path: migrations are the schema source of
-  truth → CLI applies them to a scratch DB → dumps a schema IR → a SwiftPM
-  build-tool plugin (declared inputs/outputs, sandbox-legal) generates Swift.
-- **MySQL has no transactional DDL.** Migrations need a dirty-flag recovery model
-  there while Postgres and SQLite get all-or-nothing.
+- **MySQL/MariaDB drivers.** Called "the top schedule risk". We wrote our own —
+  `MySQLNIO` has no async/await, no backpressure hook on `onRow`, and does
+  PREPARE/EXECUTE/CLOSE on every query. `caching_sha2_password`, `sha256_password`
+  and RSA key pinning are in; `client_ed25519` is in via a vendored primitive.
+  Then the same argument took the Postgres driver too, for a different reason:
+  `postgres-nio` keeps `RowDescription` internal, which made pillar 3 impossible
+  through it.
+- **Macro expansion cost.** Did not arise. There is no `@Table` macro: table
+  declarations are **generated** by `swizzle generate schema` and committed, so
+  they cost a compile of plain structs and are reviewable in a diff.
+- **No network in macro plugins.** Correct, and it decided the design. A sqlc-style
+  `#sql("SELECT …")` cannot introspect a live database at compile time, and a
+  SwiftPM build-tool plugin cannot either — the sandbox has no network. So the
+  generator is a **CLI you run**, whose output you commit, with a lockfile so
+  `--verify` needs no database in CI. See [`docs/codegen.md`](docs/codegen.md).
+- **MySQL has no transactional DDL.** Still true, and handled: MySQL gets the
+  dirty-flag recovery model while Postgres and SQLite get all-or-nothing.
 
 ## Layout
 
@@ -140,14 +165,40 @@ Sources/
   SwizzleCore/         SQL IR, dialects, capability protocols, renderer
   SwizzleQuery/        typed builder — the target whose compile time matters
   Swizzle/             umbrella re-export
+  SwizzleMigrate/      pillar 1: sources, journal, lock, splitter, lints
+  SwizzleGenerate/     pillar 3: query files, emitters, lockfile
+  SwizzleOnlineDDL/    MySQL shadow-table copy
+  SwizzleCLI/          the `swizzle` binary
+
+  SwizzleMySQL/        driver — wire protocol, auth, binlog
+  SwizzlePostgresDriver/  driver — wire protocol v3, SCRAM, type registry
+  SwizzleSQLite/       driver — over the vendored amalgamation
+  SwizzleMySQLEngine/  \
+  SwizzlePostgres/      | engine seams: URL parsing, executor, introspector,
+  SwizzleSQLiteEngine/ /  migration dialect, query analyzer
+  SwizzleConnectionPool/  vendored from postgres-nio
+
   SwizzleSpike/        realistic worst-case queries, one per function body
   SwizzleNaiveSpike/   A/B control; separate module so its operator overloads
                        cannot contaminate the measurement
+examples/
+  migrations/          the SQL migration form, one file per directive
+  swift-migrations/    the Swift migration form, plus a runner
+  codegen/             a schema, queries, and the Swift they generate
 Scripts/
+  test-servers.sh      native MariaDB/MySQL/Postgres fixtures, no Docker
+  test-hygiene.sh      no ungated server-touching suites, no python
+  linux-tests.sh       the suite in a Linux container
   typecheck-bench.sh   per-construct cost, tuned vs naive
   scale-bench.sh       linearity check
   negative-tests.sh    compile-time rejection tests
 ```
+
+Each driver is written to be **extractable** — it depends on `SwizzleCore` and
+nothing else of ours, with the engine seam in a separate target — so any of the
+three could become its own package without a rewrite. `docs/architecture.md` has
+the separation rules and `docs/adding-a-database.md` is what a fourth engine
+would follow.
 
 The schema in `SwizzleSpike/Schema.swift` is hand-written in exactly the shape the
 future `@Table` macro will emit. For a type-checker spike that's the correct

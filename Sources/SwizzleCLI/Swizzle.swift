@@ -878,7 +878,9 @@ struct GenerateQueries: AsyncParsableCommand {
 
             becomes a `getUser(id:)` returning an optional row struct. Cardinality is \
             one of :one, :many, :stream or :exec. Use `-- +swizzle NotNull <column>` \
-            to narrow a column the engine had to be pessimistic about.
+            to narrow a column the engine had to be pessimistic about, and \
+            `-- +swizzle Type <column> <T>` to supply a type it could not report \
+            at all — SQLite cannot type `COUNT(*)`, so that one is common there.
 
             By default the migrations are run into a throwaway database and the \
             queries described there, so generated code follows the migrations rather \
@@ -918,15 +920,21 @@ struct GenerateQueries: AsyncParsableCommand {
     var verify = false
 
     func run() async throws {
-        let parsed = try QueryDirectory(path: queries).load()
-        guard !parsed.isEmpty else {
-            throw ValidationError("no .sql query files found in '\(queries)'")
-        }
-
+        // The engine is resolved *before* the query files are read, because
+        // finding where a statement ends needs the dialect's quoting rules — a
+        // Postgres `$$ … $$` body is text to every other dialect's scanner.
+        // `--verify` takes it from the lockfile, having no database to ask.
         if verify {
-            try await runVerify(parsed)
+            let lock = try Lockfile.read(from: lockfile)
+            try await runVerify(try load(syntax: Self.syntax(for: lock.engine)), lock: lock)
             return
         }
+
+        let url = try database.resolvedURL()
+        guard let engine = engines.engine(forURL: url) else {
+            throw ValidationError("no registered engine handles '\(url)'")
+        }
+        let parsed = try load(syntax: Self.syntax(for: engine.name))
 
         let (source, lock) = try await generate(parsed)
         if let out {
@@ -940,14 +948,21 @@ struct GenerateQueries: AsyncParsableCommand {
         }
     }
 
+    private func load(syntax: SQLStatementSplitter.Syntax) throws -> [ParsedQuery] {
+        let parsed = try QueryDirectory(path: queries, syntax: syntax).load()
+        guard !parsed.isEmpty else {
+            throw ValidationError("no .sql query files found in '\(queries)'")
+        }
+        return parsed
+    }
+
     /// The no-database path.
     ///
     /// Recomputes the lockfile keys from the files on disk, then re-emits Swift
     /// from the **stored** signatures and compares. Catches a query edited without
     /// regenerating, a migration added without regenerating, and generated code
     /// edited by hand — the three ways a tree goes stale.
-    private func runVerify(_ parsed: [ParsedQuery]) async throws {
-        let lock = try Lockfile.read(from: lockfile)
+    private func runVerify(_ parsed: [ParsedQuery], lock: Lockfile) async throws {
         let migrations = try MigrationDirectory(
             path: dir, syntax: Self.syntax(for: lock.engine)
         ).load()

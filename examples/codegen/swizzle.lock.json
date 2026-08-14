@@ -1,0 +1,277 @@
+{
+  "engine" : "sqlite",
+  "queries" : [
+    {
+      "file" : "notes.sql",
+      "key" : "sha256:c295dc7bbb1dd5210d35b920456ec263bc801ae0a7de1e4532304f850eea0a19",
+      "name" : "GetNote",
+      "signature" : {
+        "cardinality" : "one",
+        "columns" : [
+          {
+            "isOptional" : false,
+            "name" : "id",
+            "nullability" : "baseColumnNotNull",
+            "origin" : {
+              "column" : "id",
+              "table" : "notes"
+            },
+            "sqlType" : "INTEGER",
+            "swiftType" : {
+              "int64" : {
+
+              }
+            }
+          },
+          {
+            "isOptional" : false,
+            "name" : "title",
+            "nullability" : "baseColumnNotNull",
+            "origin" : {
+              "column" : "title",
+              "table" : "notes"
+            },
+            "sqlType" : "TEXT",
+            "swiftType" : {
+              "string" : {
+
+              }
+            }
+          },
+          {
+            "isOptional" : true,
+            "name" : "body",
+            "nullability" : "baseColumnNullable",
+            "origin" : {
+              "column" : "body",
+              "table" : "notes"
+            },
+            "sqlType" : "TEXT",
+            "swiftType" : {
+              "string" : {
+
+              }
+            }
+          }
+        ],
+        "hasOuterJoin" : false,
+        "name" : "GetNote",
+        "parameters" : [
+          {
+            "name" : "id",
+            "ordinal" : 1,
+            "source" : "declared",
+            "swiftType" : {
+              "unresolved" : {
+
+              }
+            }
+          }
+        ],
+        "sql" : "SELECT id, title, body FROM notes WHERE id = ?"
+      }
+    },
+    {
+      "file" : "notes.sql",
+      "key" : "sha256:3aaffa0485b5b86c720cb65faee56bd5e14099f645a971afffc8508f12c5cf18",
+      "name" : "ListByAuthor",
+      "signature" : {
+        "cardinality" : "many",
+        "columns" : [
+          {
+            "isOptional" : false,
+            "name" : "id",
+            "nullability" : "baseColumnNotNull",
+            "origin" : {
+              "column" : "id",
+              "table" : "notes"
+            },
+            "sqlType" : "INTEGER",
+            "swiftType" : {
+              "int64" : {
+
+              }
+            }
+          },
+          {
+            "isOptional" : false,
+            "name" : "title",
+            "nullability" : "baseColumnNotNull",
+            "origin" : {
+              "column" : "title",
+              "table" : "notes"
+            },
+            "sqlType" : "TEXT",
+            "swiftType" : {
+              "string" : {
+
+              }
+            }
+          }
+        ],
+        "hasOuterJoin" : false,
+        "name" : "ListByAuthor",
+        "parameters" : [
+          {
+            "name" : "authorID",
+            "ordinal" : 1,
+            "source" : "declared",
+            "swiftType" : {
+              "unresolved" : {
+
+              }
+            }
+          }
+        ],
+        "sql" : "SELECT id, title FROM notes WHERE author_id = ? ORDER BY id"
+      }
+    },
+    {
+      "file" : "notes.sql",
+      "key" : "sha256:1173c3e4e8a3cca13c5038405ff32a96c01491fe1cde7f831f33f23dbfe0c19d",
+      "name" : "CountNotes",
+      "signature" : {
+        "cardinality" : "one",
+        "columns" : [
+          {
+            "isOptional" : false,
+            "name" : "n",
+            "nullability" : "annotationNotNull",
+            "sqlType" : "",
+            "swiftType" : {
+              "int64" : {
+
+              }
+            }
+          }
+        ],
+        "hasOuterJoin" : false,
+        "name" : "CountNotes",
+        "parameters" : [
+
+        ],
+        "sql" : "SELECT COUNT(*) AS n FROM notes"
+      }
+    },
+    {
+      "file" : "notes.sql",
+      "key" : "sha256:d108b7c2ca2c21a8944bf7a36f577b68416eed21d40d2fef9b78a3f9a4452120",
+      "name" : "NotesWithAuthor",
+      "signature" : {
+        "cardinality" : "many",
+        "columns" : [
+          {
+            "isOptional" : false,
+            "name" : "id",
+            "nullability" : "annotationNotNull",
+            "origin" : {
+              "column" : "id",
+              "table" : "notes"
+            },
+            "sqlType" : "INTEGER",
+            "swiftType" : {
+              "int64" : {
+
+              }
+            }
+          },
+          {
+            "isOptional" : false,
+            "name" : "title",
+            "nullability" : "annotationNotNull",
+            "origin" : {
+              "column" : "title",
+              "table" : "notes"
+            },
+            "sqlType" : "TEXT",
+            "swiftType" : {
+              "string" : {
+
+              }
+            }
+          },
+          {
+            "isOptional" : true,
+            "name" : "name",
+            "nullability" : "outerJoinWidened",
+            "origin" : {
+              "column" : "name",
+              "table" : "authors"
+            },
+            "sqlType" : "TEXT",
+            "swiftType" : {
+              "string" : {
+
+              }
+            }
+          }
+        ],
+        "hasOuterJoin" : true,
+        "name" : "NotesWithAuthor",
+        "parameters" : [
+
+        ],
+        "sql" : "SELECT n.id, n.title, a.name\nFROM notes n\nLEFT JOIN authors a ON a.id = n.author_id\nORDER BY n.id"
+      }
+    },
+    {
+      "file" : "notes.sql",
+      "key" : "sha256:4965671b5531b0a0075c2993e7256c76a6b0a1165808bc76cf42662424fda2cb",
+      "name" : "StreamTitles",
+      "signature" : {
+        "cardinality" : "stream",
+        "columns" : [
+          {
+            "isOptional" : false,
+            "name" : "title",
+            "nullability" : "baseColumnNotNull",
+            "origin" : {
+              "column" : "title",
+              "table" : "notes"
+            },
+            "sqlType" : "TEXT",
+            "swiftType" : {
+              "string" : {
+
+              }
+            }
+          }
+        ],
+        "hasOuterJoin" : false,
+        "name" : "StreamTitles",
+        "parameters" : [
+
+        ],
+        "sql" : "SELECT title FROM notes ORDER BY id"
+      }
+    },
+    {
+      "file" : "notes.sql",
+      "key" : "sha256:c40c1434266f2924aec1b9ab849258e14da0f04817fd535ff09b0c298ee9bb50",
+      "name" : "DeleteNote",
+      "signature" : {
+        "cardinality" : "exec",
+        "columns" : [
+
+        ],
+        "hasOuterJoin" : false,
+        "name" : "DeleteNote",
+        "parameters" : [
+          {
+            "name" : "id",
+            "ordinal" : 1,
+            "source" : "declared",
+            "swiftType" : {
+              "unresolved" : {
+
+              }
+            }
+          }
+        ],
+        "sql" : "DELETE FROM notes WHERE id = ?"
+      }
+    }
+  ],
+  "schemaFingerprint" : "sha256:be27e267d25a5268f775258bf9c98927474615088eed8d4da9b0a6618cc9da97",
+  "version" : 1
+}

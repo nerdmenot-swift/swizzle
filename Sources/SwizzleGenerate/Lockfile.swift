@@ -95,6 +95,15 @@ extension Lockfile {
             query.parameters.map { "\($0.name):\($0.type)" }.joined(separator: ","),
             query.notNull.sorted().joined(separator: ","),
             query.nullable.sorted().joined(separator: ","),
+            // Sorted, because a dictionary has no order and an unsorted rendering
+            // would make the key differ between runs on identical input. Included
+            // at all because a `Type` directive changes the emitted Swift: leaving
+            // it out would let `--verify` pass on output that no longer matches
+            // the file it came from, which is the one thing the lockfile exists to
+            // catch.
+            query.types.sorted { $0.key < $1.key }
+                .map { "\($0.key):\($0.value.declaredName)" }
+                .joined(separator: ","),
             engine, schemaFingerprint, generatorVersion,
         ] {
             hasher.update(data: Data(part.utf8))
