@@ -418,3 +418,64 @@ Not yet:
   generated `InMemoryMigrations`, so a single-binary deployment has no directory
   to point at. `InMemoryMigrations(files:syntax:)` already takes exactly the
   shape such a plugin would emit.
+
+## Compared to `goose`
+
+The file format here is modelled on goose's, down to the `-- +swizzle Up` /
+`Down` directive shape, so the comparison is worth making explicitly.
+`references/goose` is cloned for it.
+
+### Both tools have both forms
+
+| | goose | swizzle |
+|---|---|---|
+| SQL file | `-- +goose Up` / `Down` | `-- +swizzle Up` / `Down` |
+| statement grouping | `StatementBegin` / `StatementEnd` | same, plus a scanner that recognises `BEGIN … END` bodies without them |
+| skip the transaction | `-- +goose NO TRANSACTION` | `-- +swizzle NoTransaction` |
+| code migration | a `.go` file registering `Up`/`Down` in `func init()` | a type conforming to `SwiftMigration` |
+| code, no transaction | `AddMigrationNoTxContext` | `static let usesTransaction = false` |
+| env substitution | `-- +goose ENVSUB ON` | — |
+| online DDL | — | `-- +swizzle Online` |
+| per-migration lint waiver | — | `-- +swizzle Allow <rule> <reason>` |
+| checksums | none — the journal is `version_id`, `is_applied`, `tstamp` | recorded and verified per migration |
+
+### Where the designs differ, and why
+
+**Registration.** goose registers by side effect: a `.go` file calls
+`goose.AddMigrationContext(Up, Down)` from `func init()`, and the *filename*
+supplies the version. That is less typing and two failure modes: a file nobody
+imports registers nothing and the migration silently does not exist, and the
+version lives in the filename while the code lives in the body.
+
+Swizzle asks for the version and name as static properties and for the migration
+to be handed to a `SwiftMigrations` source explicitly. More typing; a missing
+registration is a value you did not pass rather than an import you forgot.
+
+**One version space.** Both interleave SQL and code migrations by version.
+`CombinedMigrations` validates the merged set, so two migrations claiming one
+version is an error rather than something resolved by source order.
+
+**Checksums.** goose does not have them. Swizzle records one per migration and
+verifies it, and is explicit that a Swift migration's checksum covers only its
+declared identity — editing the body of an applied one is undetectable. That is
+written down in `SwiftMigration`'s doc comment rather than left to be discovered.
+
+### What this comparison found
+
+`SwiftMigration` had no way to opt out of the wrapping transaction, where both
+the SQL path and goose's code path do. It made `CREATE INDEX CONCURRENTLY`
+unreachable from Swift on Postgres — the statement cannot run inside a
+transaction block at all — and it quietly defeated the `batches(over:selecting:)`
+helper, which exists to keep transactions short and was running every chunk
+inside one long one. Only on Postgres and SQLite: MySQL's DDL is
+non-transactional, so nothing was wrapped there and the gap was invisible.
+
+`static var usesTransaction: Bool` now exists, defaulting to `true`.
+
+### Not adopted
+
+`ENVSUB`, goose's environment-variable substitution inside migration SQL. A
+migration whose text depends on the environment is a migration whose checksum
+depends on the environment, and the checksum is load-bearing here in a way it is
+not in goose. If the need arises the answer is a parameter with a recorded value,
+not a substitution at read time.

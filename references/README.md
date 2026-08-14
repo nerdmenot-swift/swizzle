@@ -133,3 +133,14 @@ API should be *used*, which is where the interesting mistakes live: statement
 lifetimes, the `prepare_v2` tail pointer, reading text by length rather than as a
 C string. Every defect the audit found was of that shape rather than a missing
 feature.
+
+## `goose` — the migration reference
+
+Cloned for the migration comparison. The `-- +swizzle Up` file format is
+modelled on goose's `-- +goose Up`, so it is the reference for pillar 1 the way
+`rust-mysql-common` is for the MySQL driver. MIT.
+
+Read it for the *shape* of a migration tool rather than for code: the directive
+vocabulary, how Go-code migrations register, and what the journal table records
+(`version_id`, `is_applied`, `tstamp` — no checksum, which is where the two
+designs part company). See `docs/migrations.md` for the full comparison.

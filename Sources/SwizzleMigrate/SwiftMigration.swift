@@ -68,6 +68,27 @@ public protocol SwiftMigration: Sendable {
     /// no `Down` section: most data transformations genuinely cannot be undone,
     /// and a `down` that pretends otherwise is worse than admitting it.
     func down(_ database: some MigrationContext) async throws
+
+    /// Whether to wrap the whole migration in one transaction. Default `true`,
+    /// matching a SQL migration with no `-- +swizzle NoTransaction`.
+    ///
+    /// ## Why this had to exist
+    ///
+    /// The SQL path has had `-- +swizzle NoTransaction` since it was written, and
+    /// `goose` — which this file format is modelled on — has the same split on
+    /// *its* code path: `AddMigrationContext` hands you a `*sql.Tx`,
+    /// `AddMigrationNoTxContext` hands you a `*sql.DB`. This path had neither, so
+    /// every Swift migration was wrapped and there was no way to say otherwise.
+    ///
+    /// Two things that makes impossible. `CREATE INDEX CONCURRENTLY` cannot run
+    /// inside a transaction block at all, so on Postgres it was simply
+    /// unreachable from a Swift migration. And `batches(over:selecting:)` was
+    /// self-defeating: chunking exists to keep transactions short, and every
+    /// chunk was landing inside one long-running transaction. The helper and the
+    /// runner were working against each other on exactly the engine — Postgres —
+    /// where it mattered, since MySQL's DDL is non-transactional and was never
+    /// wrapped anyway.
+    static var usesTransaction: Bool { get }
 }
 
 extension SwiftMigration {
@@ -82,6 +103,9 @@ extension SwiftMigration {
     /// Swift gives no way to ask, so it is declared: a migration that can be
     /// reverted says so by conforming to ``ReversibleSwiftMigration``.
     static var declaresDown: Bool { self is any ReversibleSwiftMigration.Type }
+
+    public static var usesTransaction: Bool { true }
+
 }
 
 /// A Swift migration that really can be reverted.
@@ -264,6 +288,7 @@ public struct SwiftMigrations: MigrationSource {
                 name: type.name,
                 up: .swift { try await migration.up($0) },
                 down: type.declaresDown ? .swift { try await migration.down($0) } : nil,
+                usesTransaction: type.usesTransaction,
                 checksum: Checksum.of(identity)
             )
         }
