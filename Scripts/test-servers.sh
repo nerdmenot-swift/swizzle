@@ -273,6 +273,41 @@ is_running() {
   [[ -f "$pgpid" ]] && kill -0 "$(head -1 "$pgpid")" 2>/dev/null
 }
 
+# The one certificate every fixture serves.
+#
+# Written here rather than left to each server because the alternative was three
+# different certificates generated three different ways — see `testservers/
+# tls.cnf` for what each of them was. The client stack is identical on both
+# platforms, so the certificate was the only thing that could vary, and it was
+# the only thing nobody had pinned.
+#
+# Bump `CERT_PARAMS_VERSION` to force every fixture to regenerate; the stamp is
+# what makes an existing data directory pick up a change instead of keeping the
+# certificate it was created with.
+CERT_PARAMS_VERSION="1-rsa2048-sha256-san"
+
+ensure_certificate() {
+  local dir="$1"
+  mkdir -p "$dir"
+
+  if [[ -f "$dir/server.crt" && -f "$dir/server.key" \
+     && "$(cat "$dir/server.params" 2>/dev/null)" == "$CERT_PARAMS_VERSION" ]]; then
+    return 0
+  fi
+
+  rm -f "$dir/server.crt" "$dir/server.key" "$dir/server.params"
+  openssl req -new -x509 -days 3650 -nodes \
+    -newkey rsa:2048 -sha256 \
+    -config "testservers/tls.cnf" \
+    -out "$dir/server.crt" -keyout "$dir/server.key" >/dev/null 2>&1 || {
+      echo "  could not generate a TLS certificate in $dir" >&2; return 1
+    }
+  # Postgres refuses to start if the key is group- or world-readable, and
+  # MariaDB and MySQL are happy with the same.
+  chmod 600 "$dir/server.key"
+  echo "$CERT_PARAMS_VERSION" > "$dir/server.params"
+}
+
 start_server() {
   local name="$1" version="$2" port="$3" seed="$4" flavor="${5:-mariadb}"
 
@@ -334,9 +369,17 @@ start_server() {
     compress_flags=(--log-bin-compress=ON --log-bin-compress-min-len=10)
   fi
 
+  # MariaDB 11.4 generates an **ephemeral** self-signed certificate when none is
+  # configured — not written to disk, and new on every restart. So `have_ssl`
+  # read YES on both platforms while the two were serving different
+  # certificates, from different TLS libraries, and a different one after every
+  # `test-servers.sh down && up`. Naming ours makes the TLS path reproducible.
+  ensure_certificate "$datadir" || return 1
+
   "$base/bin/mariadbd" \
     ${root_user_flag[@]+"${root_user_flag[@]}"} \
     --basedir="$base" --datadir="$datadir" \
+    --ssl-cert="$datadir/server.crt" --ssl-key="$datadir/server.key" \
     ${compress_flags[@]+"${compress_flags[@]}"} \
     --port="$port" --socket="$socket" --bind-address=127.0.0.1 \
     --innodb-buffer-pool-size=64M \
@@ -402,9 +445,16 @@ start_mysql_server() {
   case "$version" in
     8.*) native_password_flag=(--mysql-native-password=ON) ;;
   esac
+  # MySQL writes its auto-generated certificates to the data directory rather
+  # than keeping them in memory the way MariaDB does, so these were at least
+  # stable across restarts — but still one certificate per platform, from that
+  # platform's build. Same certificate as the others now.
+  ensure_certificate "$datadir" || return 1
+
   "$base/bin/mysqld" \
     ${root_user_flag[@]+"${root_user_flag[@]}"} \
     --basedir="$base" --datadir="$datadir" \
+    --ssl-cert="$datadir/server.crt" --ssl-key="$datadir/server.key" \
     --port="$port" --socket="$socket" --bind-address=127.0.0.1 \
     --mysqlx=OFF \
     --innodb-buffer-pool-size=64M \
@@ -509,21 +559,17 @@ start_postgres_server() {
   # be exercised at all. Without one the driver's whole TLS path and the
   # `-PLUS` mechanism are unreachable, which is how SCRAM itself shipped broken
   # under `--auth=trust`.
-  if [[ ! -f "$data/server.crt" ]]; then
-    openssl req -new -x509 -days 3650 -nodes -text \
-      -out "$data/server.crt" -keyout "$data/server.key" \
-      -subj "/CN=localhost" >/dev/null 2>&1 || {
-        echo "  $name: could not generate a TLS certificate" >&2; return 1
-      }
-    # Postgres refuses to start if the key is group- or world-readable.
-    chmod 600 "$data/server.key"
-    # …and it must belong to the user the postmaster runs as, which is not this
-    # one when we are root. `chmod 600` plus root ownership is exactly the
-    # combination that yields `could not load private key file: Permission
-    # denied` — the key is locked down correctly and to the wrong account.
-    if [[ "$(id -u)" -eq 0 ]]; then
-      chown "$PG_USER" "$data/server.crt" "$data/server.key" 2>/dev/null || true
-    fi
+  # This used to be an inline `openssl req` with only `-subj`, which meant the
+  # key size, digest and extensions all came from the host's openssl.cnf —
+  # LibreSSL 3.3.6 on macOS, OpenSSL 3.0.2 in the container. Same call, two
+  # certificates.
+  ensure_certificate "$data" || { echo "  $name: no TLS certificate" >&2; return 1; }
+  # The key must belong to the user the postmaster runs as, which is not this
+  # one when we are root. `chmod 600` plus root ownership is exactly the
+  # combination that yields `could not load private key file: Permission
+  # denied` — the key is locked down correctly and to the wrong account.
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown "$PG_USER" "$data/server.crt" "$data/server.key" 2>/dev/null || true
   fi
 
   # `hostssl` for the channel-binding user: the rule only matches an encrypted
@@ -585,6 +631,9 @@ stop_server() {
   # because pg_ctl owns the postmaster's shutdown handshake.
   if [[ "$flavor" == "postgres" ]]; then
     stop_postgres_server "$name" "$version"
+    # Reported like the others. While Postgres was silently not being stopped,
+    # `down` printed five lines for six servers and nobody counted.
+    echo "  $name stopped"
     return 0
   fi
 
@@ -601,11 +650,19 @@ stop_server() {
   echo "  $name stopped"
 }
 
+# Runs `action` over every configured server, passing **all five** fields.
+#
+# Process substitution rather than a pipe, and the difference is not stylistic:
+# a piped `while` runs in a subshell, so `return 1` inside it sets only that
+# subshell's status and the loop carries on. `each_server start_server || exit 1`
+# therefore reported whatever the *last* server did and a failure in the middle
+# was invisible.
 each_server() {
-  local action="$1"
-  grep -vE '^\s*(#|$)' "$CONF" | while read -r name version port seed flavor; do
-    "$action" "$name" "$version" "$port" "$seed" "${flavor:-mariadb}" || return 1
-  done
+  local action="$1" failed=0
+  while read -r name version port seed flavor; do
+    "$action" "$name" "$version" "$port" "$seed" "${flavor:-mariadb}" || failed=1
+  done < <(grep -vE '^\s*(#|$)' "$CONF")
+  return $failed
 }
 
 case "${1:-up}" in
@@ -613,29 +670,38 @@ case "${1:-up}" in
     echo "Starting MariaDB and MySQL test servers (native, no Docker)…"
     each_server start_server || exit 1
     ;;
+  # All three of these went through `while read -r name _ _ _`, which discarded
+  # the flavour — so `stop_server` defaulted to `mariadb` for every server,
+  # looked for a pidfile Postgres does not write, and returned success without
+  # stopping it. `down` quietly left the postmaster running, and `reset` and
+  # `clean` then `rm -rf`'d the data directory **out from under it**. The
+  # command you reach for when the fixtures are broken was able to break them
+  # further. `each_server` passes all five fields.
   down)
-    grep -vE '^\s*(#|$)' "$CONF" | while read -r name _ _ _; do stop_server "$name"; done
+    each_server stop_server
     ;;
   reset)
-    grep -vE '^\s*(#|$)' "$CONF" | while read -r name _ _ _; do stop_server "$name"; done
+    each_server stop_server
     rm -rf "$DATA"
     mkdir -p "$DATA"
     echo "Data directories wiped; rebuilding…"
     each_server start_server || exit 1
     ;;
   clean)
-    grep -vE '^\s*(#|$)' "$CONF" | while read -r name _ _ _; do stop_server "$name"; done
+    each_server stop_server
     rm -rf "$ROOT"
     echo "Removed $ROOT (binaries and data)."
     ;;
   status)
-    grep -vE '^\s*(#|$)' "$CONF" | while read -r name version port _; do
+    # The flavour was hardcoded to `mariadb`, so `status` cheerfully reported
+    # "postgres16 mariadb 16.4.0" and "mysql84 mariadb 8.4.3".
+    while read -r name version port _ flavor; do
       if is_running "$name"; then
-        printf "  %-12s mariadb %-8s :%s  running\n" "$name" "$version" "$port"
+        printf "  %-12s %-8s %-8s :%s  running\n" "$name" "${flavor:-mariadb}" "$version" "$port"
       else
-        printf "  %-12s mariadb %-8s :%s  stopped\n" "$name" "$version" "$port"
+        printf "  %-12s %-8s %-8s :%s  stopped\n" "$name" "${flavor:-mariadb}" "$version" "$port"
       fi
-    done
+    done < <(grep -vE '^\s*(#|$)' "$CONF")
     ;;
   *)
     echo "usage: $0 {up|down|reset|status|clean}" >&2

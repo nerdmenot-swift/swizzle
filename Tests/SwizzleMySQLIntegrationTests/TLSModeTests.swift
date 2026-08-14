@@ -108,24 +108,35 @@ struct MySQLTLSModeTests {
     /// which is the other half of the proof: the mode verifies a chain rather
     /// than refusing everything.
     ///
-    /// A MySQL fixture, because MySQL writes its auto-generated CA to `ca.pem` in
-    /// the data directory. MariaDB generates its certificate in memory and leaves
-    /// nothing on disk to trust — which is precisely why the *rejection* tests
-    /// above cover both flavours and this one does not.
+    /// **This used to be `verifyCA` against MySQL only, and both restrictions
+    /// were fixture artefacts rather than facts about the drivers.**
     ///
-    /// `verifyCA` and not `verifyFull`: MySQL's generated certificate carries
-    /// `MySQL_Server_..._Auto_Generated_Server_Certificate` as its name, which is
-    /// not `127.0.0.1`, so the hostname rung would still — correctly — refuse it.
-    @Test("verify_ca accepts the server when its CA is trusted")
-    func verifyCAAcceptsTrustedCertificate() async throws {
-        let server = TestServers.mysql84
+    /// The fixtures served three different certificates: MySQL wrote an
+    /// auto-generated CA to `ca.pem`, MariaDB 11.4 generated one *in memory* and
+    /// left nothing on disk to trust, and Postgres got one from the host's
+    /// `openssl` — LibreSSL on macOS, OpenSSL 3 in the container. So this test
+    /// could only run against MySQL, and only at the `verifyCA` rung, because
+    /// MySQL's generated certificate is named
+    /// `MySQL_Server_..._Auto_Generated_Server_Certificate` rather than
+    /// `127.0.0.1` and the hostname rung would correctly refuse it.
+    ///
+    /// `Scripts/test-servers.sh` now issues one certificate for every fixture
+    /// from `testservers/tls.cnf`, self-signed with `CA:TRUE` and a SAN covering
+    /// both `localhost` and `127.0.0.1`. So the trust root is `server.crt`, every
+    /// flavour can be checked, and the **strictest** rung is reachable for the
+    /// first time — hostname verification included.
+    @Test(
+        "verify_identity accepts the server when its certificate is trusted",
+        arguments: [TestServers.mysql84, TestServers.mariadb114]
+    )
+    func verifyFullAcceptsTrustedCertificate(_ server: MySQLTestServer) async throws {
         let certificatePath = TestServers.fixtureData
-            .appendingPathComponent("\(server.name)/ca.pem").path
+            .appendingPathComponent("\(server.name)/server.crt").path
         guard FileManager.default.fileExists(atPath: certificatePath) else {
-            Issue.record("fixture has no CA at \(certificatePath)"); return
+            Issue.record("fixture has no certificate at \(certificatePath)"); return
         }
 
-        var configuration = Self.configuration(server, tls: .verifyCA)
+        var configuration = Self.configuration(server, tls: .verifyFull)
         var tls = TLSConfiguration.makeClientConfiguration()
         tls.trustRoots = .file(certificatePath)
         configuration.tlsConfiguration = tls
@@ -173,9 +184,13 @@ struct MySQLTLSModeTests {
     @Test("ssl_ca in the URL makes verify_ca succeed against a private CA")
     func urlTrustRoot() async throws {
         let server = TestServers.mysql84
-        let ca = TestServers.fixtureData.appendingPathComponent("\(server.name)/ca.pem").path
+        // `server.crt`, not `ca.pem`: the fixtures now serve one certificate
+        // issued from `testservers/tls.cnf`, self-signed with `CA:TRUE`, so it is
+        // its own trust anchor. `ca.pem` is MySQL's auto-generated CA, which no
+        // longer signs anything.
+        let ca = TestServers.fixtureData.appendingPathComponent("\(server.name)/server.crt").path
         guard FileManager.default.fileExists(atPath: ca) else {
-            Issue.record("fixture has no CA at \(ca)"); return
+            Issue.record("fixture has no certificate at \(ca)"); return
         }
         let user = server.primaryUser
         let base =
