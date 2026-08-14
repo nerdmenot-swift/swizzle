@@ -205,7 +205,12 @@ let package = Package(
             dependencies: [
                 .product(name: "Atomics", package: "swift-atomics"),
                 .product(name: "DequeModule", package: "swift-collections"),
-            ]
+            ],
+            // Both are kept deliberately — the licence because this is vendored
+            // from postgres-nio and the attribution travels with it, the README
+            // because it records what was changed. Declared here so SwiftPM
+            // stops warning about them on every single build.
+            exclude: ["LICENSE-postgres-nio.txt", "README.md"]
         ),
 
         // libsodium's ref10 Edwards25519, vendored (ISC — see
@@ -329,6 +334,18 @@ let package = Package(
             ]
         ),
 
+        // The examples under `examples/`, compiled.
+        //
+        // No `.library` product, so nothing downstream can import them — they
+        // exist to be *read*. Being a build target is what stops them rotting:
+        // an example that no longer compiles is worse than no example, because
+        // it is the first thing a newcomer copies. goose ships `examples/` the
+        // same way, as part of its module rather than as loose files.
+        .target(
+            name: "SwizzleExamples",
+            dependencies: ["SwizzleMigrate", "SwizzleCore"],
+            path: "examples/swift-migrations"
+        ),
         .testTarget(name: "SwizzleTests", dependencies: ["Swizzle"]),
         .testTarget(
             name: "SwizzleMySQLTests",
