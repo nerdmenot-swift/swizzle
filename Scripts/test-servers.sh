@@ -16,10 +16,27 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-ROOT="$PWD/.testservers"
-DIST="$ROOT/dist"
-DATA="$ROOT/data"
-RUN="$ROOT/run"
+# `SWIZZLE_TESTSERVERS_ROOT` moves everything off the checkout.
+#
+# Needed wherever the checkout is not a normal local filesystem. Running this
+# inside a container with the project bind-mounted from macOS, `mariadb-install-db`
+# fails against the mounted path and succeeds immediately against container-local
+# storage — the same binary, the same flags, only the filesystem differs. CI wants
+# the same escape hatch for the same reason.
+ROOT="${SWIZZLE_TESTSERVERS_ROOT:-$PWD/.testservers}"
+# Binaries and data directories are keyed by **platform**, because a checkout is
+# routinely used from more than one at once: `Scripts/linux-tests.sh` mounts this
+# directory into a Linux container on a macOS host, and CI may do the same.
+#
+# Without the suffix the cache is "is the directory there", so the container
+# found the host's arm64-darwin `mariadbd` and died with
+# `cannot execute binary file: Exec format error` — a message that says nothing
+# about why. Data directories are keyed too: an initialised MySQL datadir is not
+# portable between platforms either.
+PLATFORM_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+DIST="$ROOT/dist-$PLATFORM_TAG"
+DATA="$ROOT/data-$PLATFORM_TAG"
+RUN="$ROOT/run-$PLATFORM_TAG"
 CONF="testservers/servers.conf"
 INDEX_URL="https://github.com/doze-dev/doze-binaries/releases/download/mariadb/index.yaml"
 INDEX="$DIST/index.yaml"
@@ -30,6 +47,17 @@ mkdir -p "$DIST" "$DATA" "$RUN"
 # a socket inside the project directory blows past that with no obvious cause —
 # the server just logs "socket file path is too long" and aborts.
 socket_for() { echo "/tmp/swzl-$1.sock"; }
+
+# MariaDB and MySQL refuse to run as root unless told to, and a CI container is
+# root by default:
+#
+#     Please consult the Knowledge Base to find out how to run mysqld as root!
+#
+# Empty for a normal developer account, so nothing changes there.
+root_user_flag=()
+if [[ "$(id -u)" -eq 0 ]]; then
+  root_user_flag=(--user=root)
+fi
 
 platform() {
   local arch; arch="$(uname -m)"
@@ -42,7 +70,21 @@ platform() {
 
 fetch_index() {
   [[ -f "$INDEX" ]] && return 0
-  echo "Fetching binary index…"
+  # **stderr, like every other progress message here.**
+  #
+  # `ensure_binaries` returns the base directory by echoing it, and the caller
+  # captures that with `base="$(ensure_binaries …)"`. Anything else this function
+  # prints to stdout is captured too — so on a machine that has never run this
+  # script, `base` became "Fetching binary index…" followed by the real path, and
+  # the next line failed with
+  #
+  #     .../bin/mariadb-install-db: No such file or directory
+  #
+  # naming a file that is present and executable. Invisible to anyone who has run
+  # the script before, because the index is then cached and this branch never
+  # fires: it breaks the *first* run only, which is every new contributor and
+  # every CI run.
+  echo "Fetching binary index…" >&2
   curl -sSL --max-time 120 "$INDEX_URL" -o "$INDEX" || {
     echo "could not download $INDEX_URL" >&2; exit 1
   }
@@ -66,6 +108,14 @@ index_field() {
 # downgrade in supply-chain terms — but the alternative is having no MySQL in
 # the matrix at all, and that leaves caching_sha2 full auth, sha256_password,
 # zstd, MySQL GTID and COM_BINLOG_DUMP_GTID permanently unverifiable.
+# MySQL publishes macOS as `.tar.gz` and Linux as `.tar.xz`, and the script
+# assumed gzip for both — so every Linux download 404'd, on x86_64 as well as
+# aarch64. Invisible until something tried to run the fixtures off macOS, which
+# nothing had.
+mysql_archive_suffix() {
+  [[ "$(uname -s)" == "Linux" ]] && echo "tar.xz" || echo "tar.gz"
+}
+
 mysql_url() {
   local version="$1" arch os
   case "$(uname -s)" in
@@ -77,7 +127,7 @@ mysql_url() {
       os="linux-glibc2.28" ;;
     *) echo "unsupported platform" >&2; return 1 ;;
   esac
-  echo "https://dev.mysql.com/get/Downloads/MySQL-${version%.*}/mysql-${version}-${os}-${arch}.tar.gz"
+  echo "https://dev.mysql.com/get/Downloads/MySQL-${version%.*}/mysql-${version}-${os}-${arch}.$(mysql_archive_suffix)"
 }
 
 ensure_mysql_binaries() {
@@ -87,13 +137,14 @@ ensure_mysql_binaries() {
 
   local url archive tmp
   url="$(mysql_url "$version")"
-  archive="$DIST/mysql-$version.tar.gz"
+  archive="$DIST/mysql-$version.$(mysql_archive_suffix)"
   echo "  downloading mysql ${version}…" >&2
   curl -sSL --max-time 900 "$url" -o "$archive" || { echo "download failed" >&2; exit 1; }
 
   tmp="$DIST/.unpack-mysql-$version"
   rm -rf "$tmp"; mkdir -p "$tmp"
-  tar xzf "$archive" -C "$tmp" || { echo "unpack failed" >&2; exit 1; }
+  # `-a` picks the decompressor from the file, so the same line handles both.
+  tar xaf "$archive" -C "$tmp" || { echo "unpack failed" >&2; exit 1; }
   mv "$tmp"/*/ "$base"
   rm -rf "$tmp" "$archive"
   echo "$base"
@@ -105,6 +156,32 @@ ensure_mysql_binaries() {
 # make the fixture depend on what the developer happens to have installed. Maven
 # Central is a stable unauthenticated URL with builds for every platform we care
 # about, and the jar is just a zip holding a .txz.
+# Postgres refuses to run as root outright — `initdb: cannot be run as root`,
+# with no `--user` escape of the kind MySQL and MariaDB accept. A CI container is
+# root, so everything Postgres runs through this.
+#
+# `setpriv` over `su` because it needs no login shell, no PAM, and no quoting of
+# the command: the arguments pass through as given, which matters when they
+# contain paths with spaces.
+PG_USER="${SWIZZLE_PG_USER:-swizzlepg}"
+
+ensure_pg_user() {
+  [[ "$(id -u)" -eq 0 ]] || return 0
+  id -u "$PG_USER" >/dev/null 2>&1 && return 0
+  useradd --system --no-create-home --shell /usr/sbin/nologin "$PG_USER" 2>/dev/null \
+    || adduser --system --no-create-home --shell /usr/sbin/nologin "$PG_USER" 2>/dev/null \
+    || { echo "  could not create the unprivileged user Postgres needs" >&2; return 1; }
+}
+
+# Runs a Postgres command as that user when we are root, and unchanged otherwise.
+pg_as_user() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    setpriv --reuid="$PG_USER" --regid="$PG_USER" --clear-groups "$@"
+  else
+    "$@"
+  fi
+}
+
 postgres_platform() {
   local arch; arch="$(uname -m)"
   case "$(uname -s)" in
@@ -258,6 +335,7 @@ start_server() {
   fi
 
   "$base/bin/mariadbd" \
+    ${root_user_flag[@]+"${root_user_flag[@]}"} \
     --basedir="$base" --datadir="$datadir" \
     ${compress_flags[@]+"${compress_flags[@]}"} \
     --port="$port" --socket="$socket" --bind-address=127.0.0.1 \
@@ -310,7 +388,8 @@ start_mysql_server() {
   # users at all.
   if [[ ! -d "$datadir/mysql" ]]; then
     rm -rf "$datadir"; mkdir -p "$datadir"
-    "$base/bin/mysqld" --initialize-insecure --basedir="$base" --datadir="$datadir" \
+    "$base/bin/mysqld" --initialize-insecure ${root_user_flag[@]+"${root_user_flag[@]}"} \
+      --basedir="$base" --datadir="$datadir" \
       --log-error="$RUN/$name.init.log" >/dev/null 2>&1 || {
         echo "  $name: initialisation failed (see $RUN/$name.init.log)" >&2; return 1
       }
@@ -324,6 +403,7 @@ start_mysql_server() {
     8.*) native_password_flag=(--mysql-native-password=ON) ;;
   esac
   "$base/bin/mysqld" \
+    ${root_user_flag[@]+"${root_user_flag[@]}"} \
     --basedir="$base" --datadir="$datadir" \
     --port="$port" --socket="$socket" --bind-address=127.0.0.1 \
     --mysqlx=OFF \
@@ -380,7 +460,14 @@ start_postgres_server() {
     rm -rf "$data"; mkdir -p "$data"
     # Trust auth on loopback: this is a disposable fixture, and a password file
     # would be one more thing to keep in step with the test credentials.
-    "$base/bin/initdb" -D "$data" -U postgres --auth=trust --encoding=UTF8 \
+    ensure_pg_user || return 1
+    # The data directory has to belong to the user that will own the postmaster,
+    # and so does the log initdb writes.
+    if [[ "$(id -u)" -eq 0 ]]; then
+      mkdir -p "$data" "$RUN"
+      chown -R "$PG_USER" "$data" "$RUN" 2>/dev/null || true
+    fi
+    pg_as_user "$base/bin/initdb" -D "$data" -U postgres --auth=trust --encoding=UTF8 \
       >"$RUN/$name.init.log" 2>&1 || {
         echo "  initdb failed — see $RUN/$name.init.log" >&2; return 1
       }
@@ -396,13 +483,13 @@ start_postgres_server() {
     # semicolon, so a statement split across lines is read as several.
     printf '%s\n' \
       "CREATE DATABASE swizzle_test" \
-      | "$base/bin/postgres" --single -D "$data" postgres \
+      | pg_as_user "$base/bin/postgres" --single -D "$data" postgres \
         >>"$RUN/$name.init.log" 2>&1 || {
           echo "  creating swizzle_test failed — see $RUN/$name.init.log" >&2; return 1
         }
     printf '%s\n' \
       "CREATE ROLE swizzle LOGIN SUPERUSER PASSWORD 'swizzlepass'" \
-      | "$base/bin/postgres" --single -D "$data" swizzle_test \
+      | pg_as_user "$base/bin/postgres" --single -D "$data" swizzle_test \
         >>"$RUN/$name.init.log" 2>&1 || {
           echo "  creating the swizzle role failed — see $RUN/$name.init.log" >&2; return 1
         }
@@ -430,6 +517,13 @@ start_postgres_server() {
       }
     # Postgres refuses to start if the key is group- or world-readable.
     chmod 600 "$data/server.key"
+    # …and it must belong to the user the postmaster runs as, which is not this
+    # one when we are root. `chmod 600` plus root ownership is exactly the
+    # combination that yields `could not load private key file: Permission
+    # denied` — the key is locked down correctly and to the wrong account.
+    if [[ "$(id -u)" -eq 0 ]]; then
+      chown "$PG_USER" "$data/server.crt" "$data/server.key" 2>/dev/null || true
+    fi
   fi
 
   # `hostssl` for the channel-binding user: the rule only matches an encrypted
@@ -452,23 +546,23 @@ HBA
   # reads. So each role is created under the setting that matches its rule.
   printf '%s\n' \
     "CREATE ROLE swizzle_scram LOGIN SUPERUSER PASSWORD 'scrampass'" \
-    | "$base/bin/postgres" --single -D "$data" -c password_encryption=scram-sha-256 \
+    | pg_as_user "$base/bin/postgres" --single -D "$data" -c password_encryption=scram-sha-256 \
       swizzle_test >>"$RUN/$name.init.log" 2>&1 || true
   printf '%s\n' \
     "CREATE ROLE swizzle_md5 LOGIN SUPERUSER PASSWORD 'md5pass'" \
-    | "$base/bin/postgres" --single -D "$data" -c password_encryption=md5 \
+    | pg_as_user "$base/bin/postgres" --single -D "$data" -c password_encryption=md5 \
       swizzle_test >>"$RUN/$name.init.log" 2>&1 || true
   # Reachable only over TLS, via the `hostssl` rule above — which is what makes
   # SCRAM-SHA-256-PLUS testable at all.
   printf '%s\n' \
     "CREATE ROLE swizzle_cb LOGIN SUPERUSER PASSWORD 'cbpass'" \
-    | "$base/bin/postgres" --single -D "$data" -c password_encryption=scram-sha-256 \
+    | pg_as_user "$base/bin/postgres" --single -D "$data" -c password_encryption=scram-sha-256 \
       swizzle_test >>"$RUN/$name.init.log" 2>&1 || true
 
   echo "  starting $name on $port"
   # `-k` puts the unix socket in /tmp for the same reason MySQL's does: macOS
   # caps socket paths at 103 bytes and the project directory blows past it.
-  "$base/bin/pg_ctl" -D "$data" -l "$RUN/$name.log" -w -t 30 \
+  pg_as_user "$base/bin/pg_ctl" -D "$data" -l "$RUN/$name.log" -w -t 30 \
     -o "-p $port -k /tmp -c listen_addresses=127.0.0.1 -c wal_level=logical -c ssl=on -c ssl_cert_file=$data/server.crt -c ssl_key_file=$data/server.key" \
     start >/dev/null 2>&1 || {
       echo "  $name failed to start — see $RUN/$name.log" >&2; return 1
@@ -481,7 +575,7 @@ stop_postgres_server() {
   local base="$DIST/postgres-$version"
   local data="$DATA/$name"
   [[ -x "$base/bin/pg_ctl" && -d "$data" ]] || return 0
-  "$base/bin/pg_ctl" -D "$data" -m fast stop >/dev/null 2>&1 || true
+  pg_as_user "$base/bin/pg_ctl" -D "$data" -m fast stop >/dev/null 2>&1 || true
 }
 
 stop_server() {

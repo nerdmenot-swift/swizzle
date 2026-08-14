@@ -104,8 +104,32 @@ public enum TestServers {
         .deletingLastPathComponent()  // SwizzleMySQLIntegrationTests
         .deletingLastPathComponent()  // Tests
         .deletingLastPathComponent()  // the package root
-        .appendingPathComponent(".testservers/data")
+        .appendingPathComponent(".testservers/data-\(platformTag)")
 
+    /// The platform-tagged data directory `./Scripts/test-servers.sh` writes to.
+    ///
+    /// Tagged because a checkout is routinely used from two platforms at once —
+    /// `Scripts/linux-tests.sh` mounts it into a Linux container on a macOS host.
+    /// An untagged cache meant the container found the host's binaries and died
+    /// with `cannot execute binary file`, so the fixtures now key on
+    /// `uname -s`/`uname -m` and these paths follow.
+    static var platformTag: String {
+        #if os(Linux)
+        // Matches `uname -s | tr` in the script. Swift has no direct `uname -m`,
+        // and the two architectures CI and developers use are the two below.
+        #if arch(arm64)
+        return "linux-aarch64"
+        #else
+        return "linux-x86_64"
+        #endif
+        #else
+        #if arch(arm64)
+        return "darwin-arm64"
+        #else
+        return "darwin-x86_64"
+        #endif
+        #endif
+    }
     public static let host = "127.0.0.1"
     public static let rootPassword = "rootpass"
     public static let database = "swizzle_test"

@@ -181,7 +181,9 @@ struct PostgresURLTrustRootTests {
             .deletingLastPathComponent()      // SwizzlePostgresTests
             .deletingLastPathComponent()      // Tests
             .deletingLastPathComponent()      // package root
-            .appendingPathComponent(".testservers/data/postgres16/server.crt").path
+            .appendingPathComponent(
+                ".testservers/data-\(PostgresTestServer.platformTag)/postgres16/server.crt"
+            ).path
     }
 
     /// End to end: the same server `verify-ca` refuses on trust grounds is

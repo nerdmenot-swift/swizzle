@@ -258,3 +258,57 @@ protocol work is only ever verified on a developer machine**.
 Stated plainly rather than left implicit: it is the largest remaining hole in the
 verification story, and closing it means running the fixtures inside the CI
 network namespace.
+
+## Integration tests on Linux
+
+The fixtures now run there. That took six fixes to `Scripts/test-servers.sh`,
+every one of which blocked the whole stack:
+
+| | what was wrong |
+|---|---|
+| binary cache had no platform tag | a container on a macOS host found the host's arm64-darwin `mariadbd` and died with `cannot execute binary file` |
+| `fetch_index` printed to **stdout** | `base="$(ensure_binaries …)"` captured the progress line, so `base` became `"Fetching binary index…\n/path"` and the next line reported `mariadb-install-db: No such file or directory` for a file that was present and executable. **Broke the first run on any machine** — invisible afterwards, because the index is then cached |
+| no `--user=root` | MariaDB and MySQL refuse to run as root, which a CI container is |
+| Postgres run as root | `initdb: cannot be run as root`, and unlike MySQL there is no flag for it — everything Postgres now goes through `setpriv` as an unprivileged user |
+| the TLS key owned by root | generated after the `chown`, so `chmod 600` locked it to the wrong account and the postmaster reported `could not load private key file: Permission denied` |
+| MySQL's Linux archive is `.tar.xz` | the script assumed `.tar.gz` for every platform, so **every** Linux download 404'd — on x86_64 as well as aarch64 |
+
+`SWIZZLE_TESTSERVERS_ROOT` also moves the fixtures off the checkout, which is
+needed when the checkout is a bind mount rather than a local filesystem.
+
+Reproduce the whole thing:
+
+```
+docker run --rm -v "$PWD":/src:ro swift:6.3.3 bash -c '
+  apt-get update -qq && apt-get install -y -qq curl libaio1t64 libncurses6 libnuma1 unzip xz-utils
+  ARCH=$(uname -m); ln -sf /usr/lib/$ARCH-linux-gnu/libaio.so.1t64 /usr/lib/$ARCH-linux-gnu/libaio.so.1
+  cp -r /src /work && cd /work && rm -rf .testservers .build
+  ./Scripts/test-servers.sh up && swift test'
+```
+
+The `libaio` symlink is Ubuntu 24.04's `t64` transition: MySQL wants
+`libaio.so.1` and noble ships `libaio.so.1t64`.
+
+### 15 failures that appear only on Linux
+
+**Not yet resolved, and the reason this was worth doing.** With the fixtures up,
+1391 tests run — the integration suites included, for the first time on any
+platform but macOS — and 15 fail:
+
+| file | count | symptom |
+|---|---|---|
+| `BinlogJSONTests` | 11 | a row event short: `rows.count → 4` where 5 are expected |
+| `ClosedConnectionTests` | 3 | `Already closed` **at connect**, on the TLS path |
+| `BinlogTests` | 3 | `.uncleanShutdown` |
+| `PostgresSessionTests` | 2 | `Already closed` |
+| `MySQLKeepAliveTests` | 1 | `Already closed` |
+
+The `Already closed` cases fail inside `connect` itself, over TLS, and the server
+is not the reason: MariaDB 11.4 on Linux reports `have_ssl = YES` against
+OpenSSL 3.0.2. So this is the client, and it is a genuine platform difference
+rather than a fixture gap — NIOSSL against a MariaDB-generated certificate
+behaving differently on Linux than on Darwin.
+
+These are **not** in CI yet, precisely because they are red. Putting a knowingly
+failing job in front of every push trains people to ignore it. The job goes in
+when the 15 are understood.

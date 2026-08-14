@@ -31,6 +31,27 @@ private let systemSockStream = Int32(SOCK_STREAM.rawValue)
 /// Linux. A contributor without `./Scripts/test-servers.sh up` saw the same wall
 /// of red.
 enum PostgresTestServer {
+    /// The platform-tagged directory `./Scripts/test-servers.sh` writes to.
+    ///
+    /// Tagged because a checkout is used from two platforms at once —
+    /// `Scripts/linux-tests.sh` mounts it into a Linux container on a macOS host,
+    /// and an untagged cache meant the container found the host's binaries and
+    /// died with `cannot execute binary file`.
+    static var platformTag: String {
+        #if os(Linux)
+        #if arch(arm64)
+        return "linux-aarch64"
+        #else
+        return "linux-x86_64"
+        #endif
+        #else
+        #if arch(arm64)
+        return "darwin-arm64"
+        #else
+        return "darwin-x86_64"
+        #endif
+        #endif
+    }
     static let host = "127.0.0.1"
     static let port = 5432
 
