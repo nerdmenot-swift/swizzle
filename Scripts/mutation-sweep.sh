@@ -60,9 +60,19 @@ if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain)" ]]; then
   exit 1
 fi
 
-git -C "$SOURCE_ROOT" worktree add --detach "$ARENA" HEAD >/dev/null 2>&1 || {
-  echo "could not create a scratch worktree at $ARENA" >&2; exit 1
-}
+# A killed run never reaches its cleanup trap, so git keeps the worktree
+# registered even though `rm -rf` above has taken the directory away. Every
+# later run then fails to create it — the tool could not recover from its own
+# interruption, which for something that runs for hours is not a detail.
+git -C "$SOURCE_ROOT" worktree prune >/dev/null 2>&1 || true
+
+if ! git -C "$SOURCE_ROOT" worktree add --detach "$ARENA" HEAD 2>"$WORK/worktree.err"; then
+  echo "could not create a scratch worktree at $ARENA:" >&2
+  # The reason, not just the fact. The first version swallowed git's message
+  # into /dev/null and reported seven identical failures with no cause.
+  sed 's/^/  /' "$WORK/worktree.err" >&2
+  exit 1
+fi
 cleanup() {
   cd "$SOURCE_ROOT" || return
   git -C "$SOURCE_ROOT" worktree remove --force "$ARENA" >/dev/null 2>&1 || true
