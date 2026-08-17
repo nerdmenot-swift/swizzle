@@ -1,5 +1,6 @@
 import NIOCore
 import NIOPosix
+import NIOSSL
 
 /// A single authenticated MySQL/MariaDB connection.
 ///
@@ -191,10 +192,36 @@ public final class MySQLConnection: Sendable {
     /// The command gets no reply — the server closes rather than answering — so it
     /// is written and flushed rather than sent through the command path, which
     /// would wait for a response that is never coming.
+    /// ## Why the server closing is not a failure
+    ///
+    /// `COM_QUIT` is answered *by closing the socket* — the comment above says so,
+    /// and then this method used to treat it as an error anyway. `channel.close()`
+    /// raced the server's own close: whoever got there first decided whether the
+    /// call succeeded or threw `ChannelError.alreadyClosed`, or on a TLS
+    /// connection `NIOSSLError.uncleanShutdown`, which is what NIOSSL reports when
+    /// a peer drops TCP without `close_notify` — exactly what a server that has
+    /// hung up on request does.
+    ///
+    /// macOS won the race and Linux lost it, so this read as a platform bug for
+    /// months. It is not: it is a race that Linux happens to lose, on kqueue
+    /// versus epoll delivery order, and it fails in **0.0001 s** — nothing to do
+    /// with the five-second `close_notify` wait the rest of this comment is about.
+    /// Measured with the two errors alternating run to run on the same machine,
+    /// with TLS *and* without it, which is what a race looks like and what a
+    /// platform difference does not.
+    ///
+    /// So both are the expected outcome of a delivered goodbye. Anything else
+    /// still throws.
     public func close() async throws {
         guard channel.isActive else { return }
         await sayGoodbye()
-        try await channel.close()
+        do {
+            try await channel.close()
+        } catch let error as ChannelError where error == .alreadyClosed {
+            // The server hung up first, which is what we asked it to do.
+        } catch NIOSSLError.uncleanShutdown {
+            // Ditto, over TLS: no `close_notify` from a peer that has gone.
+        }
     }
 
     /// Writes `COM_QUIT` and waits only for the write, never for a reply.

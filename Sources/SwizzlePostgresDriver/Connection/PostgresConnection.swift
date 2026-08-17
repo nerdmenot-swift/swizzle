@@ -383,7 +383,16 @@ public final class PostgresConnection: Sendable {
             // get through and a crash on the way out.
             sent.fail(error)
         }
-        try await channel.close()
+        // Postgres answers `Terminate` by closing, so `channel.close()` races the
+        // server's own close and loses often enough on Linux to fail the suite.
+        // `ChannelError.alreadyClosed` and `NIOSSLError.uncleanShutdown` are both
+        // the expected outcome of a goodbye that arrived — the same race the
+        // MySQL driver's `close()` documents at length.
+        do {
+            try await channel.close()
+        } catch let error as ChannelError where error == .alreadyClosed {
+        } catch NIOSSLError.uncleanShutdown {
+        }
     }
 
     public func closeImmediately() {
