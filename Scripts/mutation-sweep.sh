@@ -73,91 +73,64 @@ cd "$ARENA" || exit 1
 REPORT="$WORK/survivors.txt"
 : > "$REPORT"
 
-# The mutations. Each is `sed-expression|description`.
-#
-# Chosen to stay *compilable* — a mutant that does not build teaches nothing and
-# costs a full build to discover. Boundary and comparison flips are where real
-# off-by-one and wrong-operator bugs live, and they always type-check.
-MUTATIONS=(
-  's/ >= / > /|>= becomes >'
-  's/ <= / < /|<= becomes <'
-  's/ > / >= /|> becomes >='
-  's/ < / <= /|< becomes <='
-  's/ == / != /|== becomes !='
-  's/ != / == /|!= becomes =='
-  's/ && / || /|&& becomes ||'
-  's/ || / \&\& /|log-or becomes and'
-)
+# Where a mutation may be applied is decided by `mutation-sites.awk`, which masks
+# string literals and comments first. The first version of this used `sed` over
+# raw lines and 178 of its 184 survivors were operators inside strings, comments
+# and the emitter's own code templates — a report that is 97% noise is read once
+# and never again.
+SITES="$(dirname "${BASH_SOURCE[0]}")/mutation-sites.awk"
+[[ -f "$SITES" ]] || SITES="$SOURCE_ROOT/Scripts/mutation-sites.awk"
 
-files=$(find "$TARGET" -name "*.swift" | sort)
-total=0
-survived=0
-killed=0
-uncompilable=0
+total=0; survived=0; killed=0; uncompilable=0
 
 echo "Mutation sweep over $TARGET"
 [[ -n "$FILTER" ]] && echo "  test filter: $FILTER"
 echo
 
-# A baseline run, because a suite that is already red makes every mutant look
-# killed and the whole exercise reports a comforting lie.
+run_suite() {
+  if [[ -n "$FILTER" ]]; then swift test --filter "$FILTER" 2>&1
+  else swift test 2>&1; fi
+}
+
 echo "Checking the suite is green before mutating…"
-if [[ -n "$FILTER" ]]; then
-  swift test --filter "$FILTER" >/dev/null 2>&1 || { echo "baseline is RED — fix that first" >&2; exit 1; }
-else
-  swift test >/dev/null 2>&1 || { echo "baseline is RED — fix that first" >&2; exit 1; }
-fi
+run_suite >/dev/null 2>&1 || { echo "baseline is RED — fix that first" >&2; exit 1; }
 echo "  green."
 echo
 
-for file in $files; do
-  # Line numbers holding code rather than comments. Mutating a comment is a
-  # guaranteed survivor and pure noise.
-  candidates=$(grep -n "" "$file" | grep -vE ":\s*(//|///|\*)" | cut -d: -f1)
+for file in $(find "$TARGET" -name "*.swift" | sort); do
+  cp "$file" "$WORK/backup.swift"
 
-  for mutation in "${MUTATIONS[@]}"; do
-    expression="${mutation%%|*}"
-    description="${mutation##*|}"
+  while IFS=$'\t' read -r line column width replacement label; do
+    [[ -z "${line:-}" ]] && continue
+    total=$((total + 1))
 
-    for line in $candidates; do
-      original=$(sed -n "${line}p" "$file")
-      mutated=$(printf '%s' "$original" | sed "$expression")
-      [[ "$mutated" == "$original" ]] && continue
+    # Splice the replacement in at the exact column. awk throughout: the
+    # replacement is data, so no delimiter in the line can be mistaken for
+    # syntax — which is what blanked `var out = """` the first time round.
+    awk -v n="$line" -v c="$column" -v w="$width" -v r="$replacement" \
+      'NR == n { print substr($0, 1, c - 1) r substr($0, c + w); next } { print }' \
+      "$WORK/backup.swift" > "$file"
 
-      total=$((total + 1))
-      cp "$file" "$WORK/backup.swift"
+    # Build and test are separated deliberately. Grepping the combined output
+    # for "error:" counted a *failing test* whose message contained the word as
+    # an uncompilable mutant — inflating the one number that means "learned
+    # nothing" and deflating the one that means "a test caught it".
+    if ! swift build --build-tests >/dev/null 2>&1; then
+      uncompilable=$((uncompilable + 1))
+    elif run_suite >/dev/null 2>&1; then
+      survived=$((survived + 1))
+      original=$(awk -v n="$line" 'NR == n { print; exit }' "$WORK/backup.swift")
+      printf 'SURVIVED %s:%s  [%s]\n    %s\n' \
+        "$file" "$line" "$label" "$(echo "$original" | sed 's/^ *//')" >> "$REPORT"
+      printf '  \033[31mSURVIVED\033[0m %s:%s [%s]\n' "$file" "$line" "$label"
+    else
+      killed=$((killed + 1))
+    fi
 
-      # Rewritten with awk rather than `sed -i`, because the substitution has to
-      # survive whatever the line contains — and Swift lines contain `|`, `&`,
-      # `/`, `\` and `"""`. A `sed` s-command treats several of those as syntax,
-      # which is how the first version blanked `var out = """` instead of
-      # mutating an operator. awk takes the replacement as *data*: no delimiter,
-      # no escape rules, nothing in the line to get wrong.
-      awk -v n="$line" -v replacement="$mutated" \
-        'NR == n { print replacement; next } { print }' \
-        "$WORK/backup.swift" > "$file"
+    cp "$WORK/backup.swift" "$file"
+  done < <(awk -f "$SITES" "$WORK/backup.swift")
 
-      if [[ -n "$FILTER" ]]; then
-        output=$(swift test --filter "$FILTER" 2>&1)
-      else
-        output=$(swift test 2>&1)
-      fi
-      status=$?
-
-      if echo "$output" | grep -q "error:"; then
-        uncompilable=$((uncompilable + 1))
-      elif [[ $status -eq 0 ]]; then
-        survived=$((survived + 1))
-        printf 'SURVIVED %s:%s  [%s]\n    %s\n' \
-          "$file" "$line" "$description" "$(echo "$original" | sed 's/^ *//')" >> "$REPORT"
-        printf '  \033[31mSURVIVED\033[0m %s:%s [%s]\n' "$file" "$line" "$description"
-      else
-        killed=$((killed + 1))
-      fi
-
-      cp "$WORK/backup.swift" "$file"
-    done
-  done
+  cp "$WORK/backup.swift" "$file"
 done
 
 echo
