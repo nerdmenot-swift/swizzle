@@ -7,3 +7,4 @@ references/*
 !references/README.md
 .testservers/
 .build-linux/
+mutation-report.txt
