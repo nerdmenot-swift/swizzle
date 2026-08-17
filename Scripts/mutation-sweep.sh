@@ -73,8 +73,25 @@ if ! git -C "$SOURCE_ROOT" worktree add --detach "$ARENA" HEAD 2>"$WORK/worktree
   sed 's/^/  /' "$WORK/worktree.err" >&2
   exit 1
 fi
+# The fixtures live outside the checkout and the tests find them relative to
+# `#filePath`, which inside a worktree points at the worktree. Without this the
+# four TLS suites cannot read `server.crt` and the baseline is red before a
+# single mutation is applied — the sweep refuses to start and says only "baseline
+# is RED", which is true and useless.
+#
+# A symlink rather than a copy: `.testservers` holds running servers' data
+# directories, and duplicating those would mean two servers' worth of state and
+# a second set of certificates, which is the variance this whole day was spent
+# removing.
+if [[ -d "$SOURCE_ROOT/.testservers" ]]; then
+  ln -sfn "$SOURCE_ROOT/.testservers" "$ARENA/.testservers"
+fi
+
 cleanup() {
   cd "$SOURCE_ROOT" || return
+  # The symlink first: `git worktree remove` refuses to touch a tree holding
+  # anything it does not know about.
+  rm -f "$ARENA/.testservers"
   git -C "$SOURCE_ROOT" worktree remove --force "$ARENA" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
