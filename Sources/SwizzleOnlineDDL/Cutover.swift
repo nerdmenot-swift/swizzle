@@ -122,17 +122,39 @@ extension MySQLOnlineDDL {
     ) async throws {
         let deadline = ContinuousClock().now.advanced(by: configuration.cutoverTimeout)
 
+        // Tracked so the timeout can say **why** it gave up. "The applier did not
+        // catch up" describes two different incidents: one where it was working
+        // through a backlog and ran out of time, and one where it was wedged and
+        // would never have finished. The first wants a longer timeout or a
+        // quieter moment; the second wants someone to look at the applier. An
+        // operator at 3am cannot tell them apart from a bare deadline, and
+        // neither could this suite.
+        let startedAt = ContinuousClock().now
+        let appliedAtStart = state.applied
+        var lastProgressAt = startedAt
+        var lastApplied = appliedAtStart
+
         while ContinuousClock().now < deadline {
             if let failure = state.failure { throw failure }
             if state.hasSeen(marker) { return }
+            if state.applied != lastApplied {
+                lastApplied = state.applied
+                lastProgressAt = ContinuousClock().now
+            }
             report("draining", copied: 0, applied: state.applied)
             try await Task.sleep(for: .milliseconds(20))
         }
 
+        let stalledFor = ContinuousClock().now - lastProgressAt
+        let progressed = state.applied - appliedAtStart
         throw OnlineDDLError.cutoverTimedOut(
             "the change applier did not reach the cutover marker within "
-            + "\(configuration.cutoverTimeout). The original table is untouched and the "
-            + "ghost `\(plan.ghost)` is left in place; nothing was swapped."
+            + "\(configuration.cutoverTimeout). It applied \(progressed) change"
+            + "\(progressed == 1 ? "" : "s") while draining and last made progress "
+            + "\(stalledFor) ago — so it was "
+            + (stalledFor > .seconds(5) ? "stalled, not merely slow" : "still working, just not fast enough")
+            + ". The original table is untouched and the ghost `\(plan.ghost)` is "
+            + "left in place; nothing was swapped."
         )
     }
 }

@@ -41,7 +41,19 @@ struct ExecutorTests {
             configuration: .init(
                 address: .hostname(TestServers.host, port: server.port),
                 username: user.name, password: user.password,
-                database: TestServers.database, tls: .disable
+                database: TestServers.database, tls: .disable,
+                // Without this the suite is flaky against MySQL 9, and only
+                // sometimes. `caching_sha2_password` needs the RSA exchange on a
+                // **cache miss** and not otherwise, so a plaintext connection
+                // authenticates fine while the server happens to hold the
+                // password and is refused — correctly — when it does not. Which
+                // of those a test sees depends on what ran before it.
+                //
+                // The refusal is right: the server would send a public key over
+                // a plaintext connection for an attacker in the path to
+                // substitute. These fixtures are loopback-only, so accepting it
+                // explicitly is what the other integration suites already do.
+                serverPublicKey: .requestFromServer
             ),
             on: TestServers.group.next()
         )
@@ -463,7 +475,11 @@ struct ExecutorWriteTests {
                 connection: .init(
                     address: .hostname(TestServers.host, port: server.port),
                     username: user.name, password: user.password,
-                    database: TestServers.database, tls: .disable
+                    database: TestServers.database, tls: .disable,
+                    // Same reason as `connect` above: caching_sha2 full auth
+                    // happens only on a cache miss, so omitting this makes the
+                    // suite pass or fail depending on what ran before it.
+                    serverPublicKey: .requestFromServer
                 ),
                 minimumConnections: 0,
                 maximumConnections: 4
