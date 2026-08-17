@@ -642,3 +642,126 @@ struct PostgresQuerySyntaxTests {
         #expect(queries[0].sql == "SELECT id FROM users")
     }
 }
+
+/// Gaps found by `Scripts/mutation-sweep.sh`, each one a line that could be
+/// wrong with the whole suite still green.
+///
+/// The sweep breaks a comparison and checks whether anything notices. Six
+/// survivors in `SwizzleGenerate` were real, and five of them are here — the
+/// naming rules especially, because generated identifiers **are** the API a
+/// user sees, and getting `httpURL` or `user2Name` wrong is not a detail.
+// test-hygiene: no server — pure naming and type mapping
+@Suite("Generator edges")
+struct GeneratorEdgeTests {
+
+    /// `words(in:)` splits on `_`, `-`, space and `.`, and only `_` was covered.
+    /// Mutating either of the other three to `&&` — which can never be true, so
+    /// no split happens — left the suite green.
+    @Test("every separator a database uses splits a name")
+    func allSeparatorsSplit() {
+        #expect(SwiftNames.memberName("created_at") == "createdAt")
+        #expect(SwiftNames.memberName("created-at") == "createdAt")
+        #expect(SwiftNames.memberName("created at") == "createdAt")
+        #expect(SwiftNames.memberName("created.at") == "createdAt")
+        // And in combination, since a real schema mixes them.
+        #expect(SwiftNames.memberName("order-line_item count") == "orderLineItemCount")
+    }
+
+    /// A digit counts as "lower" for the case-change split, so `user2Name` breaks
+    /// at the `N` rather than running together. Mutating `isLowercase ||
+    /// isNumber` to `&&` — never true — was invisible.
+    @Test("a digit does not swallow the next case change")
+    func digitsAreWordCharacters() {
+        #expect(SwiftNames.memberName("user2Name") == "user2Name")
+        #expect(SwiftNames.memberName("address2Line") == "address2Line")
+        // The whole reason the rule exists: without it `2` resets the boundary
+        // and `Name` joins the previous word.
+        #expect(SwiftNames.memberName("http2Server") == "http2Server")
+    }
+
+    /// The initialism table existed and nothing read from it in a test, so
+    /// inverting the lookup changed nothing anyone checked.
+    @Test("initialisms are shouted where Swift shouts them")
+    func initialismsAreHonoured() {
+        // Leading: stays lowercase in a member name — `id`, not `iD`.
+        #expect(SwiftNames.memberName("id") == "id")
+        #expect(SwiftNames.memberName("url") == "url")
+        // Trailing: capitalised as the initialism, not as `Id`.
+        #expect(SwiftNames.memberName("user_id") == "userID")
+        #expect(SwiftNames.memberName("avatar_url") == "avatarURL")
+        #expect(SwiftNames.memberName("payload_json") == "payloadJSON")
+        #expect(SwiftNames.memberName("remote_ip") == "remoteIP")
+        // A word that merely contains an initialism is not one.
+        #expect(SwiftNames.memberName("idea") == "idea")
+        #expect(SwiftNames.memberName("valid_ideas") == "validIdeas")
+    }
+
+    /// `tinyint(1)` is MySQL's boolean and `tinyint` on its own is not. The
+    /// mapping distinguished them and no test did, so inverting the check was
+    /// free.
+    @Test("tinyint(1) is Bool and tinyint(4) is not")
+    func tinyintOneIsBoolean() {
+        #expect(ColumnTypeName.parse("tinyint(1)", dialect: "mysql").swiftType == .bool)
+        #expect(ColumnTypeName.parse("tinyint(4)", dialect: "mysql").swiftType == .int16)
+        #expect(ColumnTypeName.parse("tinyint", dialect: "mysql").swiftType == .int16)
+        // The spellings that are unconditionally boolean.
+        #expect(ColumnTypeName.parse("boolean", dialect: "postgres").swiftType == .bool)
+    }
+}
+
+/// The two parsing survivors, in their own suite because they need a directory.
+// test-hygiene: no server — filesystem only
+@Suite("Query directory edges")
+struct QueryDirectoryEdgeTests {
+
+    /// A directive with a keyword and no argument reaches
+    /// `let rest = parts.count > 1 ? String(parts[1]) : ""`, and nothing did.
+    /// Mutating `>` to `>=` indexes past the end of a one-element array — a
+    /// crash, not a wrong answer — and the suite stayed green because no test
+    /// ever wrote a bare directive.
+    @Test("a directive with no argument is refused, not crashed on")
+    func bareDirective() {
+        for text in [
+            "-- +swizzle NotNull\nSELECT 1;",
+            "-- +swizzle Nullable\nSELECT 1;",
+            "-- +swizzle Type\nSELECT 1;",
+            "-- +swizzle Query\nSELECT 1;",
+        ] {
+            #expect(throws: QueryParseError.self) {
+                _ = try QueryParser.parse(text, filename: "q.sql")
+            }
+        }
+    }
+
+    /// `filter { $0.hasSuffix(".sql") && !$0.hasPrefix(".") }` — swapping the
+    /// `&&` for `||` reads every file in the directory, and no test had put
+    /// anything else there to notice.
+    @Test("only .sql files are read, and dotfiles are not")
+    func directoryIgnoresEverythingElse() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("swizzle-qdir-\(UInt32.random(in: 0..<UInt32.max))")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        func write(_ name: String, _ contents: String) throws {
+            try contents.write(
+                to: directory.appendingPathComponent(name), atomically: true, encoding: .utf8
+            )
+        }
+
+        try write("users.sql", "-- +swizzle Query GetUser :one\nSELECT 1;")
+        // A README is ordinary in a queries directory and is not SQL.
+        try write("README.md", "# these are the queries")
+        // An editor backup, which is exactly the file that would otherwise be
+        // parsed as a duplicate of the real one.
+        try write("users.sql.bak", "-- +swizzle Query GetUser :one\nSELECT 2;")
+        // `.hasPrefix(".")` is the other half: a dotfile ending in .sql, which
+        // `hasSuffix` alone would happily read.
+        try write(".hidden.sql", "-- +swizzle Query Ghost :one\nSELECT 3;")
+
+        let queries = try QueryDirectory(url: directory, syntax: .sqlite).load()
+        #expect(queries.map(\.name) == ["GetUser"], "read \(queries.map(\.name))")
+    }
+}
