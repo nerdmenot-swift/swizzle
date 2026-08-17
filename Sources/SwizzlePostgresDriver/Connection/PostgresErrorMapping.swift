@@ -121,6 +121,11 @@ extension PostgresConnectionError: SQLDiagnosable {
             return .authentication
         case .protocolVersion, .unexpected:
             return .connection
+        case .connectTimeout:
+            // `.timeout`, not `.connection`: a caller retrying on a deadline
+            // wants a different backoff from one retrying on a refused socket,
+            // and `SQLErrorKind` already draws that line.
+            return .timeout
         }
     }
 
@@ -144,6 +149,10 @@ extension PostgresConnectionError: SQLDiagnosable {
             // Something went wrong mid-conversation and the position in the
             // stream is unknown. Conservative.
             return true
+        case .connectTimeout:
+            // The timeout bounds establishment only, so no statement had been
+            // sent when it fired.
+            return false
         }
     }
 }

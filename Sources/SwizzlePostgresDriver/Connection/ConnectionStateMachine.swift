@@ -1,4 +1,5 @@
 import Foundation
+import NIOCore
 
 /// Everything between "the socket is open" and "the connection is usable".
 ///
@@ -142,6 +143,11 @@ public enum PostgresConnectionError: Error, Sendable, Equatable {
     case server(PostgresServerMessage)
     case protocolVersion(newest: Int32, unsupported: [String])
     case unexpected(during: String)
+    /// `connect_timeout` elapsed before the connection was usable.
+    ///
+    /// Carries the configured value so the message can say what was asked for
+    /// rather than only that time ran out.
+    case connectTimeout(TimeAmount)
 }
 
 extension PostgresConnectionError: CustomStringConvertible {
@@ -169,6 +175,9 @@ extension PostgresConnectionError: CustomStringConvertible {
                 + (unsupported.isEmpty ? "our request" : unsupported.joined(separator: ", "))
         case .unexpected(let phase):
             "the server sent an unexpected message during \(phase)"
+        case .connectTimeout(let limit):
+            "the connection was not ready within connect_timeout "
+                + "(\(Double(limit.nanoseconds) / 1_000_000_000)s)"
         }
     }
 }

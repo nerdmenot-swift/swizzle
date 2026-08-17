@@ -38,11 +38,44 @@ struct BinlogTests {
         return try await MySQLConnection.connect(configuration: config, on: TestServers.group.next())
     }
 
-    /// Drains a bounded dump into an array.
+    /// Every event from `position` to the end of the log.
+    ///
+    /// ## The silent cap that made three suites flaky
+    ///
+    /// This used to stop at `limit` events and **return what it had**:
+    ///
+    /// ```swift
+    /// if events.count >= limit { break }
+    /// ```
+    ///
+    /// A binlog is server-wide, not table-wide, so everything every other test
+    /// writes to this server lands between `position` and the rows the caller is
+    /// looking for. Run a suite alone and there are 27 events; run the whole
+    /// suite and the concurrent binlog, column-type and JSON tests push foreign
+    /// events in front of yours by the hundred. Past 500 the caller's own rows
+    /// were never reached, and the helper reported success with a short array.
+    ///
+    /// It presented as a Linux-only failure for months — `rows.count → 4` where 5
+    /// were expected — and it is not platform-specific at all. It reproduces on
+    /// macOS in one test: 300 unrelated inserts before five real ones yields
+    /// `events=500, rows=0`. Linux differs only in how much interleaving its
+    /// scheduling produces, which is why the count moved run to run (4 of 5, 3 of
+    /// 5, 11 of 12, 4 of 12) and why the failing suite moved with it.
+    ///
+    /// The dump is non-blocking, so it ends at the end of the log on its own and
+    /// no cap is needed to terminate it. `limit` is now a runaway guard that
+    /// **throws** — a test that silently examines half its data is worse than one
+    /// that stops and says so.
+    /// - Parameter prefix: stop after this many events **on purpose**, for a
+    ///   caller that genuinely wants only the head of the dump. Distinct from
+    ///   `limit`, and the distinction is the whole fix: one is a caller saying
+    ///   "four is all I want", the other is "something has gone wrong". They were
+    ///   the same parameter, so the second silently behaved like the first.
     static func collect(
         _ server: MySQLTestServer,
         from position: (filename: String, position: UInt32),
-        limit: Int = 500
+        prefix: Int? = nil,
+        limit: Int = 200_000
     ) async throws -> [MySQLBinlogEvent] {
         let replica = try await connect(server)
         defer { replica.closeImmediately() }
@@ -56,7 +89,8 @@ struct BinlogTests {
         var events: [MySQLBinlogEvent] = []
         for try await event in stream {
             events.append(event)
-            if events.count >= limit { break }
+            if let prefix, events.count >= prefix { break }
+            if events.count >= limit { throw BinlogCollectionOverflow(limit: limit) }
         }
         return events
     }
@@ -93,7 +127,7 @@ struct BinlogTests {
         defer { connection.closeImmediately() }
         let start = try await connection.binlogPosition()
 
-        let events = try await Self.collect(server, from: start, limit: 4)
+        let events = try await Self.collect(server, from: start, prefix: 4)
         let types = events.map(\.eventType)
         #expect(types.first == .rotate, "got \(String(describing: types))")
         #expect(types.dropFirst().first == .formatDescription)
@@ -653,5 +687,16 @@ struct BinlogTransactionPayloadTests {
         }
         #expect(rows.count == 1)
         #expect(rows[0][0].int == 1)
+    }
+}
+/// The runaway guard in `BinlogTests.collect` tripping.
+///
+/// An error rather than a truncated array, because the truncation was the bug:
+/// a helper that quietly returns half the log makes every assertion downstream
+/// meaningless while still looking like a real failure of the thing under test.
+struct BinlogCollectionOverflow: Error, CustomStringConvertible {
+    let limit: Int
+    var description: String {
+        "binlog collection exceeded \(limit) events without reaching the end of the log"
     }
 }

@@ -28,7 +28,21 @@ struct PostgresConnectTimeoutTests {
     /// case an unreachable-but-responding host would not reproduce.
     static let blackHole = "192.0.2.1"
 
-    @Test("a black-holed host fails within the timeout rather than hanging")
+    /// **This asserted on the wall clock, and the wall clock measures the
+    /// machine.** It read `elapsed < .seconds(5)` against a configured 300 ms,
+    /// and it failed in a Linux container at 5.14 s — under a suite running 1400
+    /// tests in parallel, where a timer firing late says nothing about whether
+    /// the timeout was applied. The codebase already had this lesson written down
+    /// twice, in `ClosedConnectionTests`, about a sibling bound that failed at
+    /// 2.95 s the first time it ran in a container.
+    ///
+    /// A timing assertion here was never the point anyway. The contract is *"the
+    /// configured value is the one that bounds the attempt"*, and the error says
+    /// so exactly: it carries the `TimeAmount` that fired. Asserting on that is
+    /// stronger than any bound — a 300 ms timeout reported as 300 ms cannot have
+    /// come from NIO's 10-second default — and it cannot flake, because it does
+    /// not consult a clock.
+    @Test("a black-holed host fails with the configured timeout rather than hanging")
     func timesOut() async throws {
         var configuration = PostgresConnectionConfiguration(
             address: .tcp(host: Self.blackHole, port: 5432),
@@ -36,23 +50,66 @@ struct PostgresConnectTimeoutTests {
         )
         configuration.connectTimeout = .milliseconds(300)
 
-        let start = ContinuousClock().now
-        await #expect(throws: (any Error).self) {
+        do {
             let connection = try await PostgresConnection.connect(
                 configuration: configuration,
                 on: MultiThreadedEventLoopGroup.singleton.next()
             )
             connection.closeImmediately()
+            Issue.record("a black-holed host must not connect")
+        } catch let error as PostgresConnectionError {
+            #expect(error == .connectTimeout(.milliseconds(300)))
+        } catch let error as ChannelError {
+            // NIO's own connect timeout, which fires first when the *TCP* phase
+            // is what stalls. It carries the same value, and that value is the
+            // assertion — anything else means our configuration was ignored.
+            #expect(error == .connectTimeout(.milliseconds(300)))
         }
-        let elapsed = ContinuousClock().now - start
+    }
 
-        // Five seconds is the discriminating threshold, not a precision claim:
-        // the setting asks for 300 ms and NIO's default is 10 s, so anything in
-        // between separates "our value was applied" from "the default was".
-        #expect(
-            elapsed < .seconds(5),
-            "took \(elapsed) — the configured connect timeout did not apply"
+    /// The gap the test above could not have caught, and the reason the timeout
+    /// moved.
+    ///
+    /// `ClientBootstrap.connectTimeout` bounds the **TCP handshake only**. A
+    /// server that accepts a connection and then says nothing — a half-open NAT,
+    /// a misconfigured proxy, a stalled TLS handshake — left `connect` awaiting a
+    /// promise forever, with no deadline anywhere.
+    ///
+    /// `libpq` does not work that way and neither does `pgx`, which puts it in as
+    /// many words: *"ConnectTimeout restricts the whole connection process."* So
+    /// this connects to a socket that accepts and then never speaks.
+    @Test("the timeout covers a server that accepts and then stalls")
+    func timeoutCoversTheWholeConnection() async throws {
+        // A listening socket that accepts connections and sends nothing. The TCP
+        // connect therefore *succeeds*, which is precisely what the bootstrap's
+        // own timeout does not cover.
+        let group = MultiThreadedEventLoopGroup.singleton
+        let silent = try await ServerBootstrap(group: group)
+            .serverChannelOption(.backlog, value: 16)
+            .childChannelInitializer { _ in group.next().makeSucceededVoidFuture() }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        defer { try? silent.close().wait() }
+        let port = try #require(silent.localAddress?.port)
+
+        var configuration = PostgresConnectionConfiguration(
+            address: .tcp(host: "127.0.0.1", port: port), username: "swizzle"
         )
+        configuration.connectTimeout = .milliseconds(500)
+        // `disable`, so the stall is in the startup exchange rather than in a TLS
+        // handshake — both are covered, and this is the one with fewer moving
+        // parts.
+        configuration.tlsMode = .disable
+
+        do {
+            let connection = try await PostgresConnection.connect(
+                configuration: configuration, on: group.next()
+            )
+            connection.closeImmediately()
+            Issue.record("a silent server must not produce a usable connection")
+        } catch let error as PostgresConnectionError {
+            #expect(error == .connectTimeout(.milliseconds(500)))
+        }
     }
 
     /// A timeout that also broke *working* connections would be worse than none.

@@ -247,7 +247,7 @@ struct BenchmarkTests {
         }
 
         let began = DispatchTime.now().uptimeNanoseconds
-        let events = try await BinlogTests.collect(TestServers.latest, from: start, limit: 100_000)
+        let events = try await BinlogTests.collect(TestServers.latest, from: start)
         let seconds = Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9
 
         let rows = events.reduce(0) { total, event in

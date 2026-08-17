@@ -76,7 +76,7 @@ struct BinlogJSONTests {
             )
         }
 
-        let events = try await BinlogTests.collect(server, from: start, limit: 2000)
+        let events = try await BinlogTests.collect(server, from: start)
         var decoded: [Int64: String] = [:]
         for event in events {
             guard case .rows(let rows) = event.payload, rows.table.table == table,

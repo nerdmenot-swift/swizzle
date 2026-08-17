@@ -42,7 +42,7 @@ struct QueryStatusVarTests {
         let threadID = connection.metadata.connectionID
         let start = try await connection.binlogPosition()
         try await body(connection)
-        let events = try await BinlogTests.collect(server, from: start, limit: 2000)
+        let events = try await BinlogTests.collect(server, from: start)
         return events.compactMap {
             guard case .query(let q) = $0.payload, q.threadID == threadID else { return nil }
             return q

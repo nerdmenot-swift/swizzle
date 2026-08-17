@@ -1,3 +1,4 @@
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import NIOSSL
@@ -90,6 +91,29 @@ public final class PostgresConnection: Sendable {
             throw error
         }
 
+        // `connect_timeout` bounds the **whole** connection, not just the TCP
+        // connect — which is what `libpq` documents and what `pgx` spells out in
+        // as many words: "ConnectTimeout restricts the whole connection process."
+        //
+        // `ClientBootstrap.connectTimeout` above covers the TCP handshake alone,
+        // so a server that accepted a connection and then stalled — mid-TLS, or
+        // after `StartupMessage` and before `ReadyForQuery` — left us awaiting
+        // `tlsPromise` or `readyPromise` **forever**. A stalled TLS handshake is
+        // not exotic: it is what a misconfigured proxy or a half-open NAT does.
+        //
+        // The deadline closes the channel rather than failing the promises
+        // directly. Completing a promise twice traps in NIO, and both of these
+        // are owned by handlers that fail them on `channelInactive`; closing
+        // therefore surfaces the failure through the path that already exists.
+        // The flag is what turns that generic failure back into a timeout, so the
+        // error names the cause instead of reporting a closed connection.
+        let timedOut = NIOLockedValueBox(false)
+        let deadline = eventLoop.scheduleTask(in: configuration.connectTimeout) {
+            timedOut.withLockedValue { $0 = true }
+            channel.close(promise: nil)
+        }
+        defer { deadline.cancel() }
+
         // Whether `readyPromise` has been handed to something that will complete
         // it. Until the protocol handlers are in the pipeline, nothing will —
         // and a promise that is dropped uncompleted is a `fatalError` in a debug
@@ -130,6 +154,9 @@ public final class PostgresConnection: Sendable {
         } catch {
             if !readyPromiseIsOwned { readyPromise.fail(error) }
             try? await channel.close().get()
+            if timedOut.withLockedValue({ $0 }) {
+                throw PostgresConnectionError.connectTimeout(configuration.connectTimeout)
+            }
             throw error
         }
     }
