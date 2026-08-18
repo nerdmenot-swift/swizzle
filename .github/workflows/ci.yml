@@ -11,6 +11,12 @@ name: CI
 #
 # So the point of this file is narrow and specific: make the claims in
 # `docs/platforms.md` re-check themselves.
+#
+# `linux-integration` was added later and deferred for a while on the argument
+# that a knowingly red job trains people to ignore CI. That argument expired
+# once the Linux suite went green six runs running — and the deferral had a
+# cost: two bugs lived for hours that only Linux could see, both found by hand
+# in a container rather than by anything automatic.
 
 on:
   push:
@@ -48,6 +54,57 @@ jobs:
 
       - name: Test hygiene
         run: ./Scripts/test-hygiene.sh
+
+
+  linux-integration:
+    name: Linux integration (real servers)
+    runs-on: ubuntu-latest
+    container: swift:6.3.3
+    # Longer than the suite needs, because the step that dominates is
+    # downloading three database distributions on a cold cache.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # `libaio.so.1` is what MariaDB links against and noble ships
+      # `libaio.so.1t64`, so the symlink is not optional. `xz-utils` is for
+      # MySQL, which publishes `.tar.xz` on Linux and `.tar.gz` on macOS.
+      - name: Install fixture dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq curl libaio1t64 libncurses6 libnuma1 unzip xz-utils
+          ARCH=$(uname -m)
+          ln -sf /usr/lib/$ARCH-linux-gnu/libaio.so.1t64 /usr/lib/$ARCH-linux-gnu/libaio.so.1
+
+      # The distributions, not the data directories: seeded state has to be
+      # built fresh or a schema change would be masked by a stale fixture.
+      - name: Cache database distributions
+        uses: actions/cache@v4
+        with:
+          path: .testservers/dist-linux-x86_64
+          key: testservers-dist-${{ runner.os }}-${{ hashFiles('testservers/servers.conf') }}
+
+      - name: Start the fixtures
+        run: ./Scripts/test-servers.sh up
+
+      # **Three runs, not one.** Both bugs found on this platform today appeared
+      # intermittently — the read timeout in two runs of four, the online-DDL
+      # cutover in one of four — and each passed on macOS every time. A single
+      # green run is a sample, and treating it as a verdict is exactly how
+      # fifteen Linux-only failures accumulated unnoticed.
+      - name: Test (three consecutive runs)
+        run: |
+          for run in 1 2 3; do
+            echo "── run $run ──"
+            swift test
+          done
+
+      # Runs even when the suite fails: the server logs are usually the only
+      # record of why, and a failed job that discards them costs another whole
+      # cycle to reproduce.
+      - name: Server logs
+        if: always()
+        run: tail -n 50 .testservers/run-linux-*/*.log || true
 
   musl:
     name: Static musl (${{ matrix.arch }})
