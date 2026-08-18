@@ -117,44 +117,87 @@ extension MySQLOnlineDDL {
     }
 
     /// Blocks until the applier has replayed everything committed before cutover.
-    private func waitForApplier(
+    ///
+    /// ## Why this is not one deadline
+    ///
+    /// It used to be: thirty seconds from the marker, and if the applier had not
+    /// arrived, give up. That measures the machine rather than the applier, in
+    /// exactly the way a wall-clock assertion in a test does — and it failed on a
+    /// loaded CI container while passing everywhere else, which is the signature.
+    ///
+    /// The two failures it was conflating want opposite responses:
+    ///
+    /// - **Draining a backlog.** The binlog is server-wide, so on a busy primary
+    ///   the applier reads thousands of events belonging to other tables before
+    ///   it reaches the marker. It is working; it simply has further to go. Cutting
+    ///   it off here abandons a migration at the moment it is working hardest,
+    ///   leaving a ghost table behind for a human to clean up.
+    /// - **Wedged.** The stream is dead, the connection dropped, the primary
+    ///   evicted the replica. No amount of waiting helps and thirty seconds is
+    ///   thirty seconds of a held table lock for nothing.
+    ///
+    /// So the wait now watches **liveness** — events observed, not changes
+    /// applied, because a backlog of other tables' traffic moves the first and
+    /// not the second. Progress resets the stall clock. `cutoverTimeout` stays as
+    /// an absolute ceiling so a pathologically busy server cannot hold the lock
+    /// forever, and `cutoverStallTimeout` is what actually fires when something
+    /// has gone wrong.
+    /// Internal rather than private so the stall-versus-backlog decision can be
+    /// tested directly. Staging a real wedged replica means relying on server
+    /// behaviour that differs between MariaDB and MySQL versions; the decision
+    /// itself is deterministic and is what actually needs proving.
+    func waitForApplier(
         _ state: ApplierState, toSee marker: String, plan: Plan
     ) async throws {
-        let deadline = ContinuousClock().now.advanced(by: configuration.cutoverTimeout)
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let ceiling = startedAt.advanced(by: configuration.cutoverTimeout)
 
-        // Tracked so the timeout can say **why** it gave up. "The applier did not
-        // catch up" describes two different incidents: one where it was working
-        // through a backlog and ran out of time, and one where it was wedged and
-        // would never have finished. The first wants a longer timeout or a
-        // quieter moment; the second wants someone to look at the applier. An
-        // operator at 3am cannot tell them apart from a bare deadline, and
-        // neither could this suite.
-        let startedAt = ContinuousClock().now
         let appliedAtStart = state.applied
         var lastProgressAt = startedAt
+        var lastObserved = state.observed
         var lastApplied = appliedAtStart
 
-        while ContinuousClock().now < deadline {
+        while true {
             if let failure = state.failure { throw failure }
             if state.hasSeen(marker) { return }
-            if state.applied != lastApplied {
-                lastApplied = state.applied
-                lastProgressAt = ContinuousClock().now
+
+            let observed = state.observed
+            let applied = state.applied
+            if observed != lastObserved || applied != lastApplied {
+                lastObserved = observed
+                lastApplied = applied
+                lastProgressAt = clock.now
             }
-            report("draining", copied: 0, applied: state.applied)
+
+            let stalledFor = clock.now - lastProgressAt
+            if stalledFor >= configuration.cutoverStallTimeout {
+                throw OnlineDDLError.cutoverTimedOut(
+                    "the change applier stopped making progress \(stalledFor) ago, "
+                    + "having applied \(applied - appliedAtStart) change"
+                    + "\((applied - appliedAtStart) == 1 ? "" : "s") and read \(observed) "
+                    + "binlog event\(observed == 1 ? "" : "s") while draining. It is not "
+                    + "behind, it is stuck — look at the replication connection rather "
+                    + "than raising cutoverTimeout. The original table is untouched and "
+                    + "the ghost `\(plan.ghost)` is left in place; nothing was swapped."
+                )
+            }
+            if clock.now >= ceiling {
+                throw OnlineDDLError.cutoverTimedOut(
+                    "the change applier was still draining after "
+                    + "\(configuration.cutoverTimeout) — it applied "
+                    + "\(applied - appliedAtStart) change"
+                    + "\((applied - appliedAtStart) == 1 ? "" : "s") and read \(observed) "
+                    + "binlog event\(observed == 1 ? "" : "s"), and was still moving when "
+                    + "the ceiling was reached. This is a backlog, not a fault: retry on a "
+                    + "quieter primary or raise cutoverTimeout. The original table is "
+                    + "untouched and the ghost `\(plan.ghost)` is left in place; nothing "
+                    + "was swapped."
+                )
+            }
+
+            report("draining", copied: 0, applied: applied)
             try await Task.sleep(for: .milliseconds(20))
         }
-
-        let stalledFor = ContinuousClock().now - lastProgressAt
-        let progressed = state.applied - appliedAtStart
-        throw OnlineDDLError.cutoverTimedOut(
-            "the change applier did not reach the cutover marker within "
-            + "\(configuration.cutoverTimeout). It applied \(progressed) change"
-            + "\(progressed == 1 ? "" : "s") while draining and last made progress "
-            + "\(stalledFor) ago — so it was "
-            + (stalledFor > .seconds(5) ? "stalled, not merely slow" : "still working, just not fast enough")
-            + ". The original table is untouched and the ghost `\(plan.ghost)` is "
-            + "left in place; nothing was swapped."
-        )
     }
 }

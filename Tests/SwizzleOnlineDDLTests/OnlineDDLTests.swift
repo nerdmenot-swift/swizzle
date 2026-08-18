@@ -444,3 +444,120 @@ struct OnlineMigrationTests {
         #expect(columns == ["id"])
     }
 }
+
+/// The cutover wait, which used to be one flat deadline.
+///
+/// Found by a failure that appeared once in three Linux runs and never on
+/// macOS — the signature of a bound measuring the machine rather than the code.
+/// Investigating it turned up something worse than a short timeout: the applier
+/// had no way to say it was alive. `applied` counts rows written to the ghost
+/// table, and a binlog is server-wide, so an applier reading thousands of other
+/// tables' events is working flat out with `applied` frozen. Cutover could not
+/// tell that from a dead replication connection.
+@Suite(
+    "Online DDL cutover waiting",
+    .serialized,
+    .enabled(if: OnlineTestSupport.isAvailable, "Integration servers not reachable")
+)
+struct OnlineDDLCutoverWaitTests {
+
+    /// The case that used to look identical to a stall: traffic on the server
+    /// that has nothing to do with this migration.
+    ///
+    /// `observed` must move even though `applied` does not, because that is the
+    /// entire distinction the wait now rests on.
+    @Test("foreign traffic keeps the applier visibly alive")
+    func foreignTrafficCountsAsProgress() async throws {
+        let connection = try await OnlineTestSupport.connect()
+        defer { connection.closeImmediately() }
+
+        let other = "unrelated_\(UInt32.random(in: 0..<UInt32.max))"
+        try await connection.query(
+            "CREATE TABLE \(other) (id INT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(32))")
+        defer { Task { try? await connection.query("DROP TABLE IF EXISTS \(other)") } }
+
+        let state = MySQLOnlineDDL.ApplierState()
+        #expect(state.observed == 0)
+        #expect(state.applied == 0)
+
+        // Standing in for the applier's loop: an event it looks at and discards
+        // still proves the stream is live.
+        for _ in 0..<25 { state.recordObserved() }
+
+        #expect(state.observed == 25, "reading other tables' events is progress")
+        #expect(state.applied == 0, "and none of it belongs to this migration")
+    }
+
+    /// A stall is reported as a stall, fires on the stall timeout rather than
+    /// the ceiling, and says not to raise the ceiling.
+    ///
+    /// Tested against the decision rather than against a staged eviction: making
+    /// a real replica wedge depends on server behaviour that differs by vendor
+    /// and version — reusing the primary's own `server_id`, which looked like it
+    /// should evict, does not — while the decision is deterministic and is the
+    /// part that was wrong.
+    @Test("a stalled applier fails fast and is named as stalled")
+    func stalledApplierFailsFast() async throws {
+        var configuration = MySQLOnlineDDL.Configuration()
+        configuration.cutoverStallTimeout = .milliseconds(300)
+        configuration.cutoverTimeout = .seconds(30)
+        let engine = MySQLOnlineDDL(
+            connect: { try await OnlineTestSupport.connect() }, configuration: configuration)
+
+        // Never observes, never applies, never sees the marker: wedged.
+        let state = MySQLOnlineDDL.ApplierState()
+        let plan = MySQLOnlineDDL.Plan(
+            database: "swizzle_test", table: "t", ghost: "t_gho", retired: "t_del",
+            changelog: "t_ghc", originalColumns: ["id"], primaryKey: "id",
+            primaryKeyIndex: 0)
+
+        let started = ContinuousClock().now
+        do {
+            try await engine.waitForApplier(state, toSee: "never", plan: plan)
+            Issue.record("a wedged applier must not be waited on indefinitely")
+        } catch let error as OnlineDDLError {
+            let message = "\(error)"
+            #expect(message.contains("stuck"), "should name the cause: \(message)")
+            #expect(!message.contains("backlog"), "a stall is not a backlog: \(message)")
+        }
+        // Fired on the 300ms stall timeout, nowhere near the 30s ceiling.
+        #expect(ContinuousClock().now - started < .seconds(10))
+    }
+
+    /// The opposite case, and the one that used to be misreported: an applier
+    /// reading foreign traffic keeps resetting the stall clock, so it survives to
+    /// the ceiling and is described as a backlog rather than a fault.
+    @Test("a busy applier is not mistaken for a stalled one")
+    func busyApplierIsNotStalled() async throws {
+        var configuration = MySQLOnlineDDL.Configuration()
+        configuration.cutoverStallTimeout = .milliseconds(300)
+        configuration.cutoverTimeout = .seconds(2)
+        let engine = MySQLOnlineDDL(
+            connect: { try await OnlineTestSupport.connect() }, configuration: configuration)
+
+        let state = MySQLOnlineDDL.ApplierState()
+        let plan = MySQLOnlineDDL.Plan(
+            database: "swizzle_test", table: "t", ghost: "t_gho", retired: "t_del",
+            changelog: "t_ghc", originalColumns: ["id"], primaryKey: "id",
+            primaryKeyIndex: 0)
+
+        // Events for other tables keep arriving. `applied` never moves, which is
+        // exactly the shape that used to read as a stall.
+        let ticker = Task {
+            while !Task.isCancelled {
+                state.recordObserved()
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        defer { ticker.cancel() }
+
+        do {
+            try await engine.waitForApplier(state, toSee: "never", plan: plan)
+            Issue.record("expected the ceiling to be reached")
+        } catch let error as OnlineDDLError {
+            let message = "\(error)"
+            #expect(message.contains("backlog"), "should be reported as a backlog: \(message)")
+            #expect(!message.contains("stuck"), "a busy applier is not stuck: \(message)")
+        }
+    }
+}

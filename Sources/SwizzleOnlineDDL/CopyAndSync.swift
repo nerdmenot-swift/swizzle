@@ -9,15 +9,36 @@ extension MySQLOnlineDDL {
     final class ApplierState: @unchecked Sendable {
         private let lock = NSLock()
         private var _applied = 0
+        private var _observed = 0
         private var _failure: (any Error)?
         private var _markers: Set<String> = []
 
         var applied: Int { lock.withLock { _applied } }
-        var failure: (any Error)? { lock.withLock { _failure } }
+
+        /// Every binlog event the applier has looked at, whether or not it
+        /// concerned this migration.
+        ///
+        /// **This is what tells "busy" from "wedged", and nothing did before.**
+        /// A binlog is server-wide: the applier reads every event on the server
+        /// and discards the ones for other tables. On a busy primary it can be
+        /// working flat out for a minute without `applied` moving at all,
+        /// because none of that traffic belongs to the table being migrated.
+        ///
+        /// Cutover used to wait on a flat deadline and had no way to distinguish
+        /// that from an applier that had died — so a migration on a busy server
+        /// could be abandoned at the moment it was working hardest, and one that
+        /// was genuinely stuck was waited on for the full timeout regardless.
+        var observed: Int { lock.withLock { _observed } }
 
         func record(applied: Int) {
             lock.withLock { _applied += applied }
         }
+
+        func recordObserved() {
+            lock.withLock { _observed += 1 }
+        }
+
+        var failure: (any Error)? { lock.withLock { _failure } }
 
         /// A changelog row the applier has now seen. See `Cutover` for why this
         /// replaced tracking the binlog position.
@@ -111,6 +132,10 @@ extension MySQLOnlineDDL {
         do {
             for try await event in events {
                 if stop.isStopped { break }
+                // Counted before any filtering: the point is liveness, and the
+                // events this migration discards are exactly the ones that make
+                // a busy applier look idle.
+                state.recordObserved()
                 guard case .rows(let rows) = event.payload,
                       rows.table.schema == plan.database
                 else { continue }
