@@ -100,6 +100,18 @@ public struct PostgresConnectionConfiguration: Sendable {
     /// client that leaves it off can hang forever on a reaped connection.
     public var tcpKeepalive: TCPKeepalive = TCPKeepalive()
 
+    /// Fail a command if the server sends nothing for this long.
+    ///
+    /// Off by default, matching `go-sql-driver`'s `ReadTimeout` and for its
+    /// reason: a legitimate query can be silent for minutes — a large
+    /// aggregate, a lock wait — and killing those by default would be a more
+    /// obvious break than the hang it prevents.
+    ///
+    /// ``tcpKeepalive`` handles the idle-connection case and is on by default.
+    /// This covers the narrower one it cannot: a path that dies **while a
+    /// command is in flight**, before keep-alive probes have noticed.
+    public var readTimeout: TimeAmount?
+
     public var connectTimeout: TimeAmount
 
     public init(

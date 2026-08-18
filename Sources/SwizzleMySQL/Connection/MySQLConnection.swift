@@ -1,3 +1,4 @@
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import NIOSSL
@@ -141,6 +142,29 @@ public final class MySQLConnection: Sendable {
         // socket exists, best-effort. See `TCPKeepalive.tune`.
         await configuration.tcpKeepalive.tune(channel)
 
+        // `connect_timeout` bounds the **whole** connection, not just the TCP
+        // handshake — the same gap the Postgres driver had, and the same fix.
+        //
+        // `ClientBootstrap.connectTimeout` covers the TCP connect alone, so a
+        // server that accepted a socket and then said nothing left this awaiting
+        // `readyPromise` forever. Not hypothetical: a listener that accepts and
+        // never speaks hung the test that found this until it was killed at ten
+        // minutes.
+        //
+        // Found because the Postgres fix was applied to Postgres and the sibling
+        // driver was not checked — the two connect paths are near-identical and
+        // one of them was left with the bug.
+        //
+        // The deadline closes the channel rather than failing the promise, since
+        // the handler owns it and completing a promise twice traps; the flag is
+        // what turns the resulting close into a timeout that names its cause.
+        let timedOut = NIOLockedValueBox(false)
+        let deadline = eventLoop.scheduleTask(in: configuration.connectTimeout) {
+            timedOut.withLockedValue { $0 = true }
+            channel.close(promise: nil)
+        }
+        defer { deadline.cancel() }
+
         do {
             let metadata = try await readyPromise.futureResult.get()
             let connection = MySQLConnection(
@@ -175,6 +199,13 @@ public final class MySQLConnection: Sendable {
             return connection
         } catch {
             try? await channel.close().get()
+            if timedOut.withLockedValue({ $0 }) {
+                throw MySQLProtocolError.connectionClosed(
+                    "the connection was not ready within connect_timeout "
+                    + "(\(configuration.connectTimeout.nanoseconds / 1_000_000)ms) — the "
+                    + "server accepted the socket but did not complete the handshake"
+                )
+            }
             throw error
         }
     }

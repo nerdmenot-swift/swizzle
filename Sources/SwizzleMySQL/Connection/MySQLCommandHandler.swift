@@ -185,6 +185,7 @@ final class MySQLCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
         case binlog(Binlog)
     }
 
+    private let readTimeout: TimeAmount?
     private let capabilities: MySQLCapabilities
     private let localInfile: MySQLConnectionConfiguration.LocalInfile
     private let onProgress: (@Sendable (MySQLProgressReport) -> Void)?
@@ -205,12 +206,44 @@ final class MySQLCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
         capabilities: MySQLCapabilities,
         sessionState: MySQLSessionState,
         localInfile: MySQLConnectionConfiguration.LocalInfile = .disabled,
-        onProgress: (@Sendable (MySQLProgressReport) -> Void)? = nil
+        onProgress: (@Sendable (MySQLProgressReport) -> Void)? = nil,
+        readTimeout: TimeAmount? = nil
     ) {
         self.localInfile = localInfile
         self.onProgress = onProgress
         self.capabilities = capabilities
         self.sessionState = sessionState
+        self.readTimeout = readTimeout
+    }
+
+    /// A read timeout firing while a command is outstanding.
+    ///
+    /// The check for an outstanding command is the whole subtlety. An idle
+    /// pooled connection reads nothing by definition, so failing on every idle
+    /// event would close exactly the connections that are behaving correctly —
+    /// turning a safety feature into a pool that empties itself.
+    ///
+    /// Binlog is exempt for the same reason at a longer timescale: a blocking
+    /// dump against a quiet server is silent until somebody writes, and that
+    /// silence is the feature working.
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        guard case IdleStateHandler.IdleStateEvent.read = event else {
+            context.fireUserInboundEventTriggered(event)
+            return
+        }
+        switch activity {
+        case .idle, .binlog:
+            return
+        case .buffering, .streaming, .changingUser:
+            let limit = readTimeout.map { amount in "\(amount.nanoseconds / 1_000_000)ms" } ?? "the read timeout"
+            fail(
+                MySQLProtocolError.connectionClosed(
+                    "the server sent nothing for \(limit) while a command was in flight — "
+                    + "the connection is being closed rather than waited on"
+                )
+            )
+            context.close(promise: nil)
+        }
     }
 
     func handlerAdded(context: ChannelHandlerContext) {

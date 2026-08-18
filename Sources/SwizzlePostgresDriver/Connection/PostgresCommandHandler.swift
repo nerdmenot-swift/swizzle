@@ -99,8 +99,37 @@ final class PostgresCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// issuing anything, and a client-side flag would never know.
     private(set) var transactionStatus: PostgresTransactionStatus = .idle
 
-    init(statementCacheCapacity: Int = PostgresStatementCache.defaultCapacity) {
+    private let readTimeout: TimeAmount?
+
+    init(
+        statementCacheCapacity: Int = PostgresStatementCache.defaultCapacity,
+        readTimeout: TimeAmount? = nil
+    ) {
         self.cache = PostgresStatementCache(capacity: statementCacheCapacity)
+        self.readTimeout = readTimeout
+    }
+
+    /// A read timeout firing while a command is outstanding.
+    ///
+    /// The `running` check is the whole subtlety. An idle pooled connection
+    /// reads nothing by definition, so failing on every idle event would close
+    /// exactly the connections that are behaving — a safety feature that empties
+    /// the pool. A `LISTEN` connection is idle by design for even longer.
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        guard case IdleStateHandler.IdleStateEvent.read = event else {
+            context.fireUserInboundEventTriggered(event)
+            return
+        }
+        guard running != nil else { return }
+        let limit = readTimeout.map { amount in "\(amount.nanoseconds / 1_000_000)ms" }
+            ?? "the read timeout"
+        failEverything(
+            PostgresConnectionError.unexpected(
+                during: "a command with no reply for \(limit) — the connection is being "
+                    + "closed rather than waited on"
+            )
+        )
+        context.close(promise: nil)
     }
 
     func handlerAdded(context: ChannelHandlerContext) {

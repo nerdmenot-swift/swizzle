@@ -129,11 +129,20 @@ final class PostgresChannelHandler: ChannelDuplexHandler, @unchecked Sendable {
             _ = context.channel.setOption(.autoRead, value: false)
 
             do {
+                // In front of the command handler so the idle event arrives as an
+                // inbound user event. Installed only when asked for: it schedules
+                // a repeating task per connection.
+                if let readTimeout = configuration.readTimeout {
+                    try context.pipeline.syncOperations.addHandler(
+                        IdleStateHandler(readTimeout: readTimeout), position: .after(self)
+                    )
+                }
                 try context.pipeline.syncOperations.addHandler(
                     PostgresCommandHandler(
-                        statementCacheCapacity: configuration.statementCacheCapacity
+                        statementCacheCapacity: configuration.statementCacheCapacity,
+                        readTimeout: configuration.readTimeout
                     ),
-                    position: .after(self)
+                    position: .last
                 )
             } catch {
                 fail(error, context: context)

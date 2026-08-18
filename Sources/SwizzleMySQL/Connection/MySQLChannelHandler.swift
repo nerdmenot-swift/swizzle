@@ -236,14 +236,25 @@ final class MySQLChannelHandler: ChannelDuplexHandler, @unchecked Sendable {
             // Added only now, because it needs the negotiated capabilities —
             // DEPRECATE_EOF in particular changes how a result set terminates.
             do {
+                // The read timeout rides in front of the command handler so the
+                // idle event reaches it as an inbound user event. Installed only
+                // when asked for: `IdleStateHandler` schedules a repeating task
+                // per connection, and a pool of them would pay for a feature
+                // nobody switched on.
+                if let readTimeout = configuration.readTimeout {
+                    try context.pipeline.syncOperations.addHandler(
+                        IdleStateHandler(readTimeout: readTimeout), position: .after(self)
+                    )
+                }
                 try context.pipeline.syncOperations.addHandler(
                     MySQLCommandHandler(
                         capabilities: machine.negotiated.capabilities,
                         sessionState: sessionState,
                         localInfile: configuration.localInfile,
-                        onProgress: configuration.onProgress
+                        onProgress: configuration.onProgress,
+                        readTimeout: configuration.readTimeout
                     ),
-                    position: .after(self)
+                    position: .last
                 )
             } catch {
                 fail(error, context: context)

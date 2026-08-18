@@ -276,6 +276,26 @@ public struct MySQLConnectionConfiguration: Sendable {
     /// client that leaves it off can hang forever on a reaped connection.
     public var tcpKeepalive: TCPKeepalive = TCPKeepalive()
 
+    /// Fail a command if the server sends nothing for this long.
+    ///
+    /// **Off by default, and that is the reference behaviour rather than an
+    /// oversight.** `go-sql-driver`'s `NewConfig` leaves `ReadTimeout` at zero
+    /// for a good reason: a legitimate query can produce no bytes for minutes —
+    /// a large aggregate, a lock wait, an `ALTER` — and a driver that killed
+    /// those by default would be broken in a more obvious way than the hang it
+    /// was trying to prevent.
+    ///
+    /// Set it when you would rather fail than wait: a request path with its own
+    /// deadline, or a network where a silently dropped flow is likelier than a
+    /// slow query. ``tcpKeepalive`` covers the idle-connection case on its own
+    /// and is on by default; this covers the narrower case of a path that dies
+    /// **while a command is in flight**, where keep-alive probes have not yet
+    /// had time to notice.
+    ///
+    /// Never applied to a binlog stream: a blocking dump on a quiet server is
+    /// silent for as long as nobody writes, and that is the whole point of it.
+    public var readTimeout: TimeAmount?
+
     public var connectTimeout: TimeAmount
 
     public init(
