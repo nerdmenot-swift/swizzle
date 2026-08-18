@@ -40,7 +40,9 @@ public final class PostgresConnection: Sendable {
         let capture = PostgresCertificateCapture()
         let tlsPromise = eventLoop.makePromise(of: PostgresTLSNegotiation.self)
 
-        let bootstrap = ClientBootstrap(group: eventLoop)
+        let bootstrap = configuration.tcpKeepalive.apply(
+            to: ClientBootstrap(group: eventLoop)
+        )
             .connectTimeout(configuration.connectTimeout)
             .channelInitializer { channel in
                 do {
@@ -90,6 +92,10 @@ public final class PostgresConnection: Sendable {
             readyPromise.fail(error)
             throw error
         }
+
+        // The idle/interval/count knobs live at IPPROTO_TCP and are set once the
+        // socket exists, best-effort. See `TCPKeepalive.tune`.
+        await configuration.tcpKeepalive.tune(channel)
 
         // `connect_timeout` bounds the **whole** connection, not just the TCP
         // connect — which is what `libpq` documents and what `pgx` spells out in

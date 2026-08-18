@@ -96,6 +96,10 @@ public struct PostgresConnectionConfiguration: Sendable {
     /// This bounds the *connect*, not the handshake. A server that completes the
     /// TCP connection and then stalls is a different failure, and the caller's own
     /// task cancellation is the tool for it.
+    /// TCP keep-alive. On by default — see `TCPKeepalive` for why a database
+    /// client that leaves it off can hang forever on a reaped connection.
+    public var tcpKeepalive: TCPKeepalive = TCPKeepalive()
+
     public var connectTimeout: TimeAmount
 
     public init(

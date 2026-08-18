@@ -272,6 +272,10 @@ public struct MySQLConnectionConfiguration: Sendable {
     public var capabilities: MySQLCapabilities
     public var mariaDBCapabilities: MySQLCapabilities
     public var characterSet: UInt8
+    /// TCP keep-alive. On by default — see `TCPKeepalive` for why a database
+    /// client that leaves it off can hang forever on a reaped connection.
+    public var tcpKeepalive: TCPKeepalive = TCPKeepalive()
+
     public var connectTimeout: TimeAmount
 
     public init(

@@ -80,7 +80,9 @@ public final class MySQLConnection: Sendable {
         let sessionState = MySQLSessionState()
         let compressionState = MySQLCompressionState()
 
-        let bootstrap = ClientBootstrap(group: eventLoop)
+        let bootstrap = configuration.tcpKeepalive.apply(
+            to: ClientBootstrap(group: eventLoop)
+        )
             .connectTimeout(configuration.connectTimeout)
             // autoRead stays on for the handshake and is turned off the moment
             // authentication succeeds — see the note in MySQLChannelHandler.
@@ -134,6 +136,10 @@ public final class MySQLConnection: Sendable {
             readyPromise.fail(error)
             throw error
         }
+
+        // The idle/interval/count knobs live at IPPROTO_TCP and are set once the
+        // socket exists, best-effort. See `TCPKeepalive.tune`.
+        await configuration.tcpKeepalive.tune(channel)
 
         do {
             let metadata = try await readyPromise.futureResult.get()
