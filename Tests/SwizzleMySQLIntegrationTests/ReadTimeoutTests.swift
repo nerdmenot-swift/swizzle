@@ -112,3 +112,50 @@ struct MySQLReadTimeoutTests {
         #expect(try await connection.query("SELECT 1").rows[0][0].int == 1)
     }
 }
+
+extension MySQLReadTimeoutTests {
+    /// The invariant the previous design did not have.
+    ///
+    /// The idle test above is not deterministic: it passed on macOS against the
+    /// broken `IdleStateHandler` version and failed on Linux, because whether the
+    /// overdue timer fired during the idle period or just after the next command
+    /// started was a race. A test that only sometimes catches the bug is how this
+    /// reached Linux in the first place.
+    ///
+    /// So this asserts the structural property instead — a deadline exists only
+    /// while a command does. Under the old design the clock ran continuously and
+    /// this could not have held.
+    @Test(
+        "no deadline is armed while the connection is idle",
+        .enabled(if: TestServers.isAvailable, "Integration servers not reachable")
+    )
+    func deadlineOnlyExistsDuringACommand() async throws {
+        let server = TestServers.mariadb114
+        let user = server.primaryUser
+        var configuration = MySQLConnectionConfiguration(
+            address: .hostname(TestServers.host, port: server.port),
+            username: user.name, password: user.password,
+            database: TestServers.database, tls: .disable,
+            serverPublicKey: .requestFromServer)
+        configuration.readTimeout = .seconds(30)
+
+        let connection = try await MySQLConnection.connect(
+            configuration: configuration, on: TestServers.group.next())
+        defer { connection.closeImmediately() }
+
+        func handler() async throws -> MySQLCommandHandler {
+            try await connection.channel.pipeline
+                .handler(type: MySQLCommandHandler.self).get()
+        }
+
+        // Freshly connected and idle.
+        #expect(try await handler().hasArmedDeadline == false)
+
+        _ = try await connection.query("SELECT 1")
+        // And idle again once the command has completed — not left armed to
+        // expire against whatever runs next.
+        #expect(
+            try await handler().hasArmedDeadline == false,
+            "a deadline outlived its command and would be charged to the next one")
+    }
+}

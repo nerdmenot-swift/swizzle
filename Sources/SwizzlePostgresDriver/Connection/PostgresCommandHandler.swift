@@ -115,21 +115,39 @@ final class PostgresCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// reads nothing by definition, so failing on every idle event would close
     /// exactly the connections that are behaving — a safety feature that empties
     /// the pool. A `LISTEN` connection is idle by design for even longer.
-    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
-        guard case IdleStateHandler.IdleStateEvent.read = event else {
-            context.fireUserInboundEventTriggered(event)
-            return
-        }
-        guard running != nil else { return }
-        let limit = readTimeout.map { amount in "\(amount.nanoseconds / 1_000_000)ms" }
-            ?? "the read timeout"
-        failEverything(
-            PostgresConnectionError.unexpected(
-                during: "a command with no reply for \(limit) — the connection is being "
-                    + "closed rather than waited on"
+    /// The per-command read deadline. See `MySQLCommandHandler` for the full
+    /// reasoning; the short version is that an `IdleStateHandler` measures
+    /// silence on the *channel*, so an idle connection accrues it and the next
+    /// command inherits the bill. That killed a healthy connection on Linux while
+    /// passing on macOS, because whether the overdue timer fired before or after
+    /// the command started was a race.
+    ///
+    /// The clock therefore starts with the command and is cancelled when it ends.
+    private var commandDeadline: Scheduled<Void>?
+
+    /// Exposed so a test can assert the invariant: no deadline is armed while no
+    /// command is in flight.
+    var hasArmedDeadline: Bool { commandDeadline != nil }
+
+    private func startCommandDeadline(_ context: ChannelHandlerContext) {
+        guard let readTimeout else { return }
+        commandDeadline?.cancel()
+        commandDeadline = context.eventLoop.scheduleTask(in: readTimeout) { [weak self] in
+            guard let self, self.running != nil else { return }
+            self.failEverything(
+                PostgresConnectionError.unexpected(
+                    during: "a command with no reply for "
+                        + "\(readTimeout.nanoseconds / 1_000_000)ms — the connection is "
+                        + "being closed rather than waited on"
+                )
             )
-        )
-        context.close(promise: nil)
+            context.close(promise: nil)
+        }
+    }
+
+    private func cancelCommandDeadline() {
+        commandDeadline?.cancel()
+        commandDeadline = nil
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -277,6 +295,7 @@ final class PostgresCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
         var machine = PostgresQueryStateMachine(mode: mode)
         let action = machine.start()
         running = Running(machine: machine, request: request, hasRetried: hasRetried)
+        startCommandDeadline(context)
         if !closes.isEmpty { apply(.send(closes), context: context) }
         apply(action, context: context)
 
@@ -389,12 +408,14 @@ final class PostgresCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
             case .succeeded(let results):
                 let request = running!.request
                 running = nil
+                cancelCommandDeadline()
                 if case .pipeline(_, let promise) = request { promise.succeed(results) }
                 startNextIfIdle(context: context)
                 return
             case .failed(let error):
                 let request = running!.request
                 running = nil
+                cancelCommandDeadline()
                 if case .pipeline(_, let promise) = request { promise.fail(error) }
                 startNextIfIdle(context: context)
                 return
@@ -407,6 +428,7 @@ final class PostgresCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
         if case .pipelineSync(let promise) = state.request {
             if case .readyForQuery = message {
                 running = nil
+                cancelCommandDeadline()
                 promise.succeed(())
                 startNextIfIdle(context: context)
             }
@@ -424,6 +446,7 @@ final class PostgresCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
                 return
             case .readyForQuery:
                 running = nil
+                cancelCommandDeadline()
                 if case .draining(let error) = state.machine.phase {
                     promise.fail(PostgresConnectionError.server(error))
                 } else {
@@ -569,6 +592,7 @@ final class PostgresCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
             flushPendingRows()
             guard let state = running else { return }
             running = nil
+            cancelCommandDeadline()
             switch state.request {
             case .query(_, let promise):
                 promise.succeed(result)
@@ -625,6 +649,7 @@ final class PostgresCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
         case .described(let description):
             guard let state = running else { return }
             running = nil
+            cancelCommandDeadline()
             if case .describe(_, let promise) = state.request {
                 promise.succeed(description)
             }
@@ -633,6 +658,7 @@ final class PostgresCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
         case .failed(let error):
             guard let state = running else { return }
             running = nil
+            cancelCommandDeadline()
 
             // ── The trap that makes statement caching dangerous ───────────────
             //
@@ -708,8 +734,10 @@ final class PostgresCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
     }
 
     private func failEverything(_ error: any Error) {
+        cancelCommandDeadline()
         if let state = running {
             running = nil
+            cancelCommandDeadline()
             fail(state.request, error, stream: state.stream, copyOut: state.copyOut)
         }
         let queued = queue
@@ -766,6 +794,7 @@ extension PostgresCommandHandler: PostgresRowDataSource {
     func cancelStream(for stream: PostgresRowStream) {
         guard let context, running?.stream === stream else { return }
         running = nil
+        cancelCommandDeadline()
         isClosed = true
         context.close(promise: nil)
     }

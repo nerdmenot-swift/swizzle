@@ -216,36 +216,6 @@ final class MySQLCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
         self.readTimeout = readTimeout
     }
 
-    /// A read timeout firing while a command is outstanding.
-    ///
-    /// The check for an outstanding command is the whole subtlety. An idle
-    /// pooled connection reads nothing by definition, so failing on every idle
-    /// event would close exactly the connections that are behaving correctly —
-    /// turning a safety feature into a pool that empties itself.
-    ///
-    /// Binlog is exempt for the same reason at a longer timescale: a blocking
-    /// dump against a quiet server is silent until somebody writes, and that
-    /// silence is the feature working.
-    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
-        guard case IdleStateHandler.IdleStateEvent.read = event else {
-            context.fireUserInboundEventTriggered(event)
-            return
-        }
-        switch activity {
-        case .idle, .binlog:
-            return
-        case .buffering, .streaming, .changingUser:
-            let limit = readTimeout.map { amount in "\(amount.nanoseconds / 1_000_000)ms" } ?? "the read timeout"
-            fail(
-                MySQLProtocolError.connectionClosed(
-                    "the server sent nothing for \(limit) while a command was in flight — "
-                    + "the connection is being closed rather than waited on"
-                )
-            )
-            context.close(promise: nil)
-        }
-    }
-
     func handlerAdded(context: ChannelHandlerContext) {
         self.context = context
     }
@@ -267,8 +237,53 @@ final class MySQLCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
 
     /// The single place the connection returns to idle, so the deferred closes
     /// have exactly one place to be flushed from.
+    /// The per-command read deadline.
+    ///
+    /// **Not an `IdleStateHandler`, and the difference is the bug it had.** That
+    /// handler measures silence since the last *read* on the channel, which is a
+    /// property of the connection rather than of a command. A pooled connection
+    /// sat idle for 700ms with a 200ms timeout, accruing silence the whole time;
+    /// the moment the next query was issued the already-overdue event fired,
+    /// found a command in flight, and killed a connection that had done nothing
+    /// wrong. Idle time was being charged to the command that followed it.
+    ///
+    /// Checking "is a command outstanding" at fire time cannot fix that, because
+    /// by then the clock has already run. So the clock starts with the command
+    /// instead: scheduled when one is written, cancelled when the connection goes
+    /// idle. What it measures is then exactly what it claims — how long *this
+    /// command* has gone unanswered.
+    /// Exposed for the test that asserts the invariant the old design lacked:
+    /// **no deadline is armed while no command is in flight**. With an
+    /// `IdleStateHandler` the clock ran continuously, which is why idle time
+    /// ended up charged to the next command.
+    var hasArmedDeadline: Bool { commandDeadline != nil }
+
+    private var commandDeadline: Scheduled<Void>?
+
+    private func startCommandDeadline(_ context: ChannelHandlerContext) {
+        guard let readTimeout else { return }
+        commandDeadline?.cancel()
+        commandDeadline = context.eventLoop.scheduleTask(in: readTimeout) { [weak self] in
+            guard let self, !self.isIdle else { return }
+            self.fail(
+                MySQLProtocolError.connectionClosed(
+                    "the server sent nothing for \(readTimeout.nanoseconds / 1_000_000)ms "
+                    + "while a command was in flight — the connection is being closed "
+                    + "rather than waited on"
+                )
+            )
+            context.close(promise: nil)
+        }
+    }
+
+    private func cancelCommandDeadline() {
+        commandDeadline?.cancel()
+        commandDeadline = nil
+    }
+
     private func becomeIdle() {
         activity = .idle
+        cancelCommandDeadline()
         drainDeferredCloses()
     }
 
@@ -304,6 +319,11 @@ final class MySQLCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
             promise?.succeed(())
             return
         }
+
+        // The clock starts here, with the command, and is cancelled by
+        // `becomeIdle`. Binlog is exempt: a blocking dump on a quiet server is
+        // silent until somebody writes, and that silence is the feature.
+        if case .binlog = request.kind {} else { startCommandDeadline(context) }
 
         // Commands restart the sequence at 0, unlike the handshake.
         let packet = MySQLPacket(sequenceID: 0, payload: request.payload)

@@ -488,24 +488,27 @@ struct OnlineDDLCutoverWaitTests {
         #expect(state.applied == 0, "and none of it belongs to this migration")
     }
 
-    /// A stall is reported as a stall, fires on the stall timeout rather than
-    /// the ceiling, and says not to raise the ceiling.
+    /// The wait ends at the ceiling, and its message carries what an operator
+    /// needs to tell the two causes apart.
     ///
-    /// Tested against the decision rather than against a staged eviction: making
-    /// a real replica wedge depends on server behaviour that differs by vendor
-    /// and version — reusing the primary's own `server_id`, which looked like it
-    /// should evict, does not — while the decision is deterministic and is the
-    /// part that was wrong.
-    @Test("a stalled applier fails fast and is named as stalled")
-    func stalledApplierFailsFast() async throws {
+    /// **This replaced two tests that asserted a distinction which does not
+    /// exist.** They checked that a silent applier was reported as "stuck" and a
+    /// busy one as a "backlog", and both passed — against a stall timeout that
+    /// then failed a real migration on Linux, calling an applier stuck five
+    /// seconds after it had read 1160 events and caught up. Silence does not
+    /// separate "wedged" from "finished"; the tests were consistent with the
+    /// code and the code was wrong.
+    ///
+    /// What is testable is that the wait terminates and says what it saw.
+    @Test("the wait ends at the ceiling and reports what it saw")
+    func waitEndsAtTheCeiling() async throws {
         var configuration = MySQLOnlineDDL.Configuration()
-        configuration.cutoverStallTimeout = .milliseconds(300)
-        configuration.cutoverTimeout = .seconds(30)
+        configuration.cutoverTimeout = .milliseconds(400)
         let engine = MySQLOnlineDDL(
             connect: { try await OnlineTestSupport.connect() }, configuration: configuration)
 
-        // Never observes, never applies, never sees the marker: wedged.
         let state = MySQLOnlineDDL.ApplierState()
+        for _ in 0..<7 { state.recordObserved() }
         let plan = MySQLOnlineDDL.Plan(
             database: "swizzle_test", table: "t", ghost: "t_gho", retired: "t_del",
             changelog: "t_ghc", originalColumns: ["id"], primaryKey: "id",
@@ -514,50 +517,15 @@ struct OnlineDDLCutoverWaitTests {
         let started = ContinuousClock().now
         do {
             try await engine.waitForApplier(state, toSee: "never", plan: plan)
-            Issue.record("a wedged applier must not be waited on indefinitely")
+            Issue.record("the wait must not run past its ceiling")
         } catch let error as OnlineDDLError {
             let message = "\(error)"
-            #expect(message.contains("stuck"), "should name the cause: \(message)")
-            #expect(!message.contains("backlog"), "a stall is not a backlog: \(message)")
+            // The counts are the diagnosis: many events and no marker is a
+            // backlog, few events is a stream that is not delivering.
+            #expect(message.contains("read 7 binlog events"), "\(message)")
+            #expect(message.contains("applied 0 changes"), "\(message)")
+            #expect(message.contains("nothing was swapped"), "\(message)")
         }
-        // Fired on the 300ms stall timeout, nowhere near the 30s ceiling.
         #expect(ContinuousClock().now - started < .seconds(10))
-    }
-
-    /// The opposite case, and the one that used to be misreported: an applier
-    /// reading foreign traffic keeps resetting the stall clock, so it survives to
-    /// the ceiling and is described as a backlog rather than a fault.
-    @Test("a busy applier is not mistaken for a stalled one")
-    func busyApplierIsNotStalled() async throws {
-        var configuration = MySQLOnlineDDL.Configuration()
-        configuration.cutoverStallTimeout = .milliseconds(300)
-        configuration.cutoverTimeout = .seconds(2)
-        let engine = MySQLOnlineDDL(
-            connect: { try await OnlineTestSupport.connect() }, configuration: configuration)
-
-        let state = MySQLOnlineDDL.ApplierState()
-        let plan = MySQLOnlineDDL.Plan(
-            database: "swizzle_test", table: "t", ghost: "t_gho", retired: "t_del",
-            changelog: "t_ghc", originalColumns: ["id"], primaryKey: "id",
-            primaryKeyIndex: 0)
-
-        // Events for other tables keep arriving. `applied` never moves, which is
-        // exactly the shape that used to read as a stall.
-        let ticker = Task {
-            while !Task.isCancelled {
-                state.recordObserved()
-                try? await Task.sleep(for: .milliseconds(20))
-            }
-        }
-        defer { ticker.cancel() }
-
-        do {
-            try await engine.waitForApplier(state, toSee: "never", plan: plan)
-            Issue.record("expected the ceiling to be reached")
-        } catch let error as OnlineDDLError {
-            let message = "\(error)"
-            #expect(message.contains("backlog"), "should be reported as a backlog: \(message)")
-            #expect(!message.contains("stuck"), "a busy applier is not stuck: \(message)")
-        }
     }
 }

@@ -1,7 +1,7 @@
 import NIOCore
 import NIOPosix
 import SwizzlePostgres
-import SwizzlePostgresDriver
+@testable import SwizzlePostgresDriver
 import Testing
 
 /// The read timeout and TCP keep-alive, on the Postgres side.
@@ -79,5 +79,34 @@ struct PostgresReadTimeoutTests {
         try await Task.sleep(for: .milliseconds(900))
         #expect(connection.isActive, "an idle connection was closed by the read timeout")
         #expect(try await connection.query("SELECT 2").rows[0][0] == .int(2))
+    }
+}
+
+extension PostgresReadTimeoutTests {
+    /// The same invariant asserted on the MySQL side, because the two drivers
+    /// diverging silently is how the connect hang survived a whole afternoon.
+    @Test(
+        "no deadline is armed while the connection is idle",
+        .enabled(if: PostgresTestServer.isAvailable, PostgresTestServer.skipReason)
+    )
+    func deadlineOnlyExistsDuringACommand() async throws {
+        var configuration = try PostgresConnectionConfiguration(
+            swizzleURL: PostgresTestServer.url)
+        configuration.readTimeout = .seconds(30)
+
+        let connection = try await PostgresConnection.connect(
+            configuration: configuration, on: MultiThreadedEventLoopGroup.singleton.next())
+        defer { connection.closeImmediately() }
+
+        func handler() async throws -> PostgresCommandHandler {
+            try await connection.channel.pipeline
+                .handler(type: PostgresCommandHandler.self).get()
+        }
+
+        #expect(try await handler().hasArmedDeadline == false)
+        _ = try await connection.query("SELECT 1")
+        #expect(
+            try await handler().hasArmedDeadline == false,
+            "a deadline outlived its command and would be charged to the next one")
     }
 }

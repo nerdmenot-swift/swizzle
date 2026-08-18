@@ -77,15 +77,6 @@ public struct MySQLOnlineDDL: Sendable {
         /// The error says which case you are in rather than leaving you to guess.
         public var cutoverTimeout: Duration = .seconds(30)
 
-        /// How long the applier may make **no progress at all** before cutover
-        /// gives up.
-        ///
-        /// This is the one that should normally fire. A stuck applier is stuck
-        /// immediately and waiting out `cutoverTimeout` for it is thirty seconds
-        /// of held table lock buying nothing; a busy one keeps reading events
-        /// and resets this clock even while `applied` stays flat, because the
-        /// traffic it is draining belongs to other tables.
-        public var cutoverStallTimeout: Duration = .seconds(5)
 
         public init() {}
     }

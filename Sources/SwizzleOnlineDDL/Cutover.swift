@@ -118,86 +118,57 @@ extension MySQLOnlineDDL {
 
     /// Blocks until the applier has replayed everything committed before cutover.
     ///
-    /// ## Why this is not one deadline
+    /// ## Why there is no stall timeout
     ///
-    /// It used to be: thirty seconds from the marker, and if the applier had not
-    /// arrived, give up. That measures the machine rather than the applier, in
-    /// exactly the way a wall-clock assertion in a test does — and it failed on a
-    /// loaded CI container while passing everywhere else, which is the signature.
+    /// This has been wrong twice, in opposite directions, and the second attempt
+    /// is worth recording because it looked like a fix.
     ///
-    /// The two failures it was conflating want opposite responses:
+    /// It began as one flat deadline, which could not tell a busy applier from a
+    /// dead one: `applied` counts rows written to the ghost, and an applier
+    /// reading a server-wide binlog full of *other* tables' traffic is working
+    /// flat out with `applied` frozen. So a "no progress" clock was added over
+    /// `observed` — every event looked at, filtered or not.
     ///
-    /// - **Draining a backlog.** The binlog is server-wide, so on a busy primary
-    ///   the applier reads thousands of events belonging to other tables before
-    ///   it reaches the marker. It is working; it simply has further to go. Cutting
-    ///   it off here abandons a migration at the moment it is working hardest,
-    ///   leaving a ghost table behind for a human to clean up.
-    /// - **Wedged.** The stream is dead, the connection dropped, the primary
-    ///   evicted the replica. No amount of waiting helps and thirty seconds is
-    ///   thirty seconds of a held table lock for nothing.
+    /// That fails the other way, and Linux caught it within four runs: an applier
+    /// that has **caught up** also shows no progress, because there is nothing
+    /// left to read. It reported an applier that had just read 1160 events as
+    /// stuck, five seconds after it finished its work.
     ///
-    /// So the wait now watches **liveness** — events observed, not changes
-    /// applied, because a backlog of other tables' traffic moves the first and
-    /// not the second. Progress resets the stall clock. `cutoverTimeout` stays as
-    /// an absolute ceiling so a pathologically busy server cannot hold the lock
-    /// forever, and `cutoverStallTimeout` is what actually fires when something
-    /// has gone wrong.
-    /// Internal rather than private so the stall-versus-backlog decision can be
-    /// tested directly. Staging a real wedged replica means relying on server
-    /// behaviour that differs between MariaDB and MySQL versions; the decision
-    /// itself is deterministic and is what actually needs proving.
+    /// There is no silence that distinguishes the two, because the signal is not
+    /// in the event flow at all. What is actually known here is stronger: the
+    /// marker was committed *before* this wait began, so its event exists. The
+    /// applier will reach it unless the stream is broken — and a broken stream
+    /// arrives as `state.failure`, or eventually as a dead connection now that
+    /// the binlog socket has TCP keep-alive.
+    ///
+    /// So the wait is: the marker, a failure, or the ceiling. `observed` stays in
+    /// the message because it is genuinely useful — "read 1160 events, applied 0"
+    /// tells an operator where to look — but it is diagnosis, not a trigger.
     func waitForApplier(
         _ state: ApplierState, toSee marker: String, plan: Plan
     ) async throws {
         let clock = ContinuousClock()
-        let startedAt = clock.now
-        let ceiling = startedAt.advanced(by: configuration.cutoverTimeout)
-
+        let ceiling = clock.now.advanced(by: configuration.cutoverTimeout)
         let appliedAtStart = state.applied
-        var lastProgressAt = startedAt
-        var lastObserved = state.observed
-        var lastApplied = appliedAtStart
 
-        while true {
+        while clock.now < ceiling {
             if let failure = state.failure { throw failure }
             if state.hasSeen(marker) { return }
-
-            let observed = state.observed
-            let applied = state.applied
-            if observed != lastObserved || applied != lastApplied {
-                lastObserved = observed
-                lastApplied = applied
-                lastProgressAt = clock.now
-            }
-
-            let stalledFor = clock.now - lastProgressAt
-            if stalledFor >= configuration.cutoverStallTimeout {
-                throw OnlineDDLError.cutoverTimedOut(
-                    "the change applier stopped making progress \(stalledFor) ago, "
-                    + "having applied \(applied - appliedAtStart) change"
-                    + "\((applied - appliedAtStart) == 1 ? "" : "s") and read \(observed) "
-                    + "binlog event\(observed == 1 ? "" : "s") while draining. It is not "
-                    + "behind, it is stuck — look at the replication connection rather "
-                    + "than raising cutoverTimeout. The original table is untouched and "
-                    + "the ghost `\(plan.ghost)` is left in place; nothing was swapped."
-                )
-            }
-            if clock.now >= ceiling {
-                throw OnlineDDLError.cutoverTimedOut(
-                    "the change applier was still draining after "
-                    + "\(configuration.cutoverTimeout) — it applied "
-                    + "\(applied - appliedAtStart) change"
-                    + "\((applied - appliedAtStart) == 1 ? "" : "s") and read \(observed) "
-                    + "binlog event\(observed == 1 ? "" : "s"), and was still moving when "
-                    + "the ceiling was reached. This is a backlog, not a fault: retry on a "
-                    + "quieter primary or raise cutoverTimeout. The original table is "
-                    + "untouched and the ghost `\(plan.ghost)` is left in place; nothing "
-                    + "was swapped."
-                )
-            }
-
-            report("draining", copied: 0, applied: applied)
+            report("draining", copied: 0, applied: state.applied)
             try await Task.sleep(for: .milliseconds(20))
         }
+
+        let applied = state.applied - appliedAtStart
+        let observed = state.observed
+        throw OnlineDDLError.cutoverTimedOut(
+            "the change applier did not reach the cutover marker within "
+            + "\(configuration.cutoverTimeout). It applied \(applied) change"
+            + "\(applied == 1 ? "" : "s") and read \(observed) binlog event"
+            + "\(observed == 1 ? "" : "s") while draining. Many events and no marker "
+            + "means a backlog — retry on a quieter primary or raise cutoverTimeout; "
+            + "few events means the replication stream is not delivering, which is "
+            + "where to look. The original table is untouched and the ghost "
+            + "`\(plan.ghost)` is left in place; nothing was swapped."
+        )
     }
 }
