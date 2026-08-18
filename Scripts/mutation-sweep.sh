@@ -108,7 +108,7 @@ REPORT="$WORK/survivors.txt"
 SITES="$(dirname "${BASH_SOURCE[0]}")/mutation-sites.awk"
 [[ -f "$SITES" ]] || SITES="$SOURCE_ROOT/Scripts/mutation-sites.awk"
 
-total=0; survived=0; killed=0; uncompilable=0
+total=0; survived=0; killed=0; uncompilable=0; hung=0
 
 echo "Mutation sweep over $TARGET"
 [[ -n "$FILTER" ]] && echo "  test filter: $FILTER"
@@ -117,6 +117,40 @@ echo
 run_suite() {
   if [[ -n "$FILTER" ]]; then swift test --filter "$FILTER" 2>&1
   else swift test 2>&1; fi
+}
+
+# A mutant can **hang** rather than fail, and without a bound one of them stops
+# the entire sweep.
+#
+# Found the hard way: inverting `guard code == SQLITE_ROW` in the SQLite driver
+# turns row-stepping into an infinite loop. The suite never returned, and a run
+# of 1078 mutants sat on that one mutant for 23 minutes before anybody looked.
+# Any of the remaining thousand could do the same.
+#
+# A timeout counts as **killed** — the suite did not pass, which is the only
+# question being asked — but it is tallied separately, because "this line is
+# checked" and "changing this line hangs the process" are different facts, and
+# the second is worth knowing on its own.
+#
+# macOS ships no `timeout`, so this polls. The kill is by arena path rather than
+# by process name: `pkill -f swiftpm-testing-helper` would take out a test run
+# the user happened to start in another window.
+MUTATION_TIMEOUT="${MUTATION_TIMEOUT:-180}"
+
+run_suite_bounded() {
+  run_suite >/dev/null 2>&1 &
+  local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null && (( waited < MUTATION_TIMEOUT )); do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null
+    pkill -9 -f "$ARENA" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 124
+  fi
+  wait "$pid"
 }
 
 echo "Checking the suite is green before mutating…"
@@ -144,14 +178,25 @@ for file in $(find "$TARGET" -name "*.swift" | sort); do
     # nothing" and deflating the one that means "a test caught it".
     if ! swift build --build-tests >/dev/null 2>&1; then
       uncompilable=$((uncompilable + 1))
-    elif run_suite >/dev/null 2>&1; then
-      survived=$((survived + 1))
-      original=$(awk -v n="$line" 'NR == n { print; exit }' "$WORK/backup.swift")
-      printf 'SURVIVED %s:%s  [%s]\n    %s\n' \
-        "$file" "$line" "$label" "$(echo "$original" | sed 's/^ *//')" >> "$REPORT"
-      printf '  \033[31mSURVIVED\033[0m %s:%s [%s]\n' "$file" "$line" "$label"
     else
-      killed=$((killed + 1))
+      run_suite_bounded
+      outcome=$?
+      if [[ $outcome -eq 0 ]]; then
+        survived=$((survived + 1))
+        original=$(awk -v n="$line" 'NR == n { print; exit }' "$WORK/backup.swift")
+        printf 'SURVIVED %s:%s  [%s]\n    %s\n' \
+          "$file" "$line" "$label" "$(echo "$original" | sed 's/^ *//')" >> "$REPORT"
+        printf '  \033[31mSURVIVED\033[0m %s:%s [%s]\n' "$file" "$line" "$label"
+      else
+        killed=$((killed + 1))
+        if [[ $outcome -eq 124 ]]; then
+          hung=$((hung + 1))
+          printf 'HUNG %s:%s  [%s]\n    %s\n' \
+            "$file" "$line" "$label" \
+            "$(awk -v n="$line" 'NR == n { print; exit }' "$WORK/backup.swift" | sed 's/^ *//')" \
+            >> "$REPORT"
+        fi
+      fi
     fi
 
     cp "$WORK/backup.swift" "$file"
@@ -165,6 +210,7 @@ echo "  mutants:      $total"
 echo "  killed:       $killed"
 echo "  survived:     $survived"
 echo "  uncompilable: $uncompilable"
+[[ $hung -gt 0 ]] && echo "  (of the killed, $hung hung rather than failed)"
 if [[ $((killed + survived)) -gt 0 ]]; then
   echo "  score:        $(awk -v k="$killed" -v s="$survived" 'BEGIN{printf "%.1f%%", 100*k/(k+s)}')"
 fi
