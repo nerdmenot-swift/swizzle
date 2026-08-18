@@ -158,7 +158,19 @@ run_suite >/dev/null 2>&1 || { echo "baseline is RED — fix that first" >&2; ex
 echo "  green."
 echo
 
+# Refuse to write outside the arena, checked per file rather than assumed once.
+#
+# A mutant leaked into the real working tree once. The isolation was already
+# here — worktree, relative paths, cd into the arena — and something still got
+# past it, which is the point: an invariant that is merely arranged for is not
+# an invariant. This asserts it at the moment of writing, where being wrong is
+# cheap to detect and expensive to miss.
 for file in $(find "$TARGET" -name "*.swift" | sort); do
+  resolved="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
+  case "$resolved" in
+    "$ARENA"/*) ;;
+    *) echo "refusing to mutate $resolved — outside $ARENA" >&2; exit 1 ;;
+  esac
   cp "$file" "$WORK/backup.swift"
 
   while IFS=$'\t' read -r line column width replacement label; do
