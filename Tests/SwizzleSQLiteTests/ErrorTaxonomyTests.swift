@@ -295,3 +295,50 @@ extension QueryTimeoutTests {
         #expect(rows.first?.values.first == .int(1))
     }
 }
+
+extension QueryTimeoutTests {
+    /// The race the CI runner found, staged rather than waited for.
+    ///
+    /// `sqlite3_interrupt` does nothing when no statement is running. The
+    /// stopwatch test above cancels while the slow query is *already stepping*,
+    /// so the interrupt lands, and it passes on any machine quick enough to have
+    /// started it. That is why it passed locally for months and failed on
+    /// GitHub's macOS runner as `elapsed → 36.69 seconds < 10.0 seconds` — not a
+    /// slow interrupt, but one that arrived before there was anything to
+    /// interrupt, after which the query ran all 200,000,000 iterations.
+    ///
+    /// ## Why this asserts a side effect rather than a duration
+    ///
+    /// The first version of this test blocked the queue with a slow *query* and
+    /// timed a `SELECT 1`. It passed — and passed just as happily with the fix
+    /// removed, which is how it was caught. `interrupt()` is connection-wide, so
+    /// cancelling the `SELECT` interrupted the **blocker**, freed the queue, and
+    /// the timing said nothing about the statement under test.
+    ///
+    /// So the queue is held by a plain sleep, which SQLite cannot interrupt, and
+    /// the claim is checked directly: a statement cancelled before it starts must
+    /// **not run**. An `INSERT` leaves evidence either way.
+    @Test("a statement cancelled before it starts never runs")
+    func cancelledBeforeTheStatementBegins() async throws {
+        let connection = try SQLiteConnection.inMemory()
+        defer { connection.close() }
+        _ = try await connection.query("CREATE TABLE marks (id INTEGER PRIMARY KEY)")
+
+        // Held by something SQLite has no idea about, so the cancellation below
+        // cannot free it.
+        connection.occupyQueueForTesting(seconds: 1.5)
+
+        await #expect(throws: (any Error).self) {
+            try await withQueryTimeout(.milliseconds(50)) {
+                _ = try await connection.query("INSERT INTO marks (id) VALUES (1)")
+            }
+        }
+
+        // Wait out the blocker. If the cancelled INSERT was merely queued rather
+        // than refused, this is when it would land.
+        try await Task.sleep(for: .seconds(2))
+        let rows = try await connection.query("SELECT COUNT(*) FROM marks")
+        let value = rows[0].values[0]
+        #expect(value == .int(0), "a statement cancelled before it began still ran: \(value)")
+    }
+}

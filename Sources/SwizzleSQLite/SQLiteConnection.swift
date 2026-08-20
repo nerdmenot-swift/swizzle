@@ -214,6 +214,17 @@ public final class SQLiteConnection: @unchecked Sendable {
 
     // MARK: - The queue hop
 
+    /// A per-operation cancellation flag.
+    ///
+    /// Not on the connection: it belongs to one `withQueue` call, and a
+    /// connection-wide flag would leave a cancelled query poisoning the next one.
+    private final class CancellationFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isCancelled: Bool { lock.withLock { value } }
+        func mark() { lock.withLock { value = true } }
+    }
+
     private func withQueue<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
         // `sqlite3_step` is a blocking C call on a dispatch queue: it does not
         // notice Swift's cancellation, so a cancelled task would otherwise wait
@@ -224,7 +235,28 @@ public final class SQLiteConnection: @unchecked Sendable {
         // and it is explicitly documented as safe to call from another thread
         // while a statement is running. The interrupted step returns
         // `SQLITE_INTERRUPT`, which the taxonomy maps to `.timeout`.
-        try await withTaskCancellationHandler {
+        //
+        // ## The flag, and the race it closes
+        //
+        // The interrupt alone is not enough, and the gap is a real one rather
+        // than a theoretical one: **`sqlite3_interrupt` does nothing if no
+        // statement is running.** Cancellation fires on whatever thread the
+        // deadline expires on, while the work is sitting in `queue.async`
+        // waiting for its turn. If the interrupt lands in that window it is a
+        // no-op, the step then starts *afterwards*, and the statement runs to
+        // completion with nothing bounding it.
+        //
+        // Which side of the window you land on is a scheduling race, so it is
+        // invisible on an idle laptop and reproducible on a loaded machine. It
+        // failed in CI on macOS as `elapsed → 36.69 seconds < 10.0 seconds`: not
+        // a slow interrupt, a query that ran all 200,000,000 iterations because
+        // the interrupt arrived before there was anything to interrupt.
+        //
+        // The flag closes it from the other side. Either the step is already
+        // running, and the interrupt stops it, or it has not started, and this
+        // refuses to start it.
+        let cancelled = CancellationFlag()
+        return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 queue.async {
                     guard self.isOpen else {
@@ -233,12 +265,38 @@ public final class SQLiteConnection: @unchecked Sendable {
                         ))
                         return
                     }
+                    guard !cancelled.isCancelled else {
+                        // Reported as an interrupt rather than as a cancellation
+                        // so it lands in the taxonomy where an interrupted step
+                        // does — the caller cannot tell the two apart and should
+                        // not have to.
+                        continuation.resume(throwing: SQLiteError(
+                            code: SQLITE_INTERRUPT,
+                            message: "interrupted before the statement began",
+                            sql: nil
+                        ))
+                        return
+                    }
                     continuation.resume(with: Result { try work() })
                 }
             }
         } onCancel: {
+            // Order matters: the flag first, so a step that is about to start
+            // sees it. Interrupting first would leave a window where the flag is
+            // still clear and the interrupt has already been spent.
+            cancelled.mark()
             self.interrupt()
         }
+    }
+
+    /// Occupies the serial queue with work SQLite knows nothing about.
+    ///
+    /// Test-only, and it exists because `interrupt()` is connection-wide: a
+    /// blocker made of SQLite work gets interrupted by the very cancellation
+    /// under test, which frees the queue and makes the test pass for the wrong
+    /// reason. A plain sleep cannot be interrupted, so the queue stays held.
+    func occupyQueueForTesting(seconds: Double) {
+        queue.async { Thread.sleep(forTimeInterval: seconds) }
     }
 
     /// Stops whatever statement is running, from any thread.
