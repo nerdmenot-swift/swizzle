@@ -9,11 +9,12 @@
 // `SwizzleCore` and nothing else of ours, so any one of them can be lifted out
 // into its own package. Two copies of a value type is the price of that, and it
 // is cheaper than the coupling.
-#if canImport(Darwin)
-import Darwin
-#else
-import Glibc
-#endif
+// No libc import: every symbol here comes from NIO, and the one that looked
+// like it needed one — `IPPROTO_TCP` — is only mentioned in a comment. The
+// reflex `#if canImport(Darwin) import Darwin #else import Glibc #endif` broke
+// **both static-musl cross-builds**, where the module is not called `Glibc`,
+// while compiling cleanly on macOS and on Linux glibc. `canImport` below still
+// selects the platform's option numbers; it does not need the module imported.
 import NIOCore
 import NIOPosix
 
