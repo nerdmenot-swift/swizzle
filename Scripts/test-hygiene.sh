@@ -85,6 +85,22 @@ else
 fi
 
 echo ""
+echo "═══ Every script is executable"
+echo ""
+# A `.sh` in Scripts/ that has lost its `+x` bit fails as `permission denied`,
+# which reads like a sandbox problem rather than a file mode. Lost twice here in
+# one week, both times by a tool of mine rewriting a script with `awk > file` —
+# which creates a new file at the default mode and silently drops the bit. Git
+# records the mode, so this also catches a checkout that lost it in transit.
+not_executable=$(find Scripts -name "*.sh" ! -perm -u+x -print 2>/dev/null || true)
+if [[ -z "$not_executable" ]]; then
+  report_pass "all Scripts/*.sh carry the executable bit"
+else
+  report_fail "scripts are not executable:"
+  echo "$not_executable" | sed 's/^/      /'
+fi
+
+echo ""
 echo "  $pass passed, $fail failed"
 echo ""
 [[ $fail -eq 0 ]]

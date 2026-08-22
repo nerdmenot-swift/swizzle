@@ -331,13 +331,15 @@ start_server() {
   datadir="$DATA/$name"
   socket="$(socket_for "$port")"
 
-  local fresh=0
   if [[ ! -d "$datadir/mysql" ]]; then
-    fresh=1
     rm -rf "$datadir"; mkdir -p "$datadir"
+    # Initialisation errors used to go to /dev/null too, for the same reason the
+    # seed's did: nobody had needed them yet.
     "$base/bin/mariadb-install-db" --basedir="$base" --datadir="$datadir" \
-      --auth-root-authentication-method=normal >/dev/null 2>&1 || {
-        echo "  $name: initialisation failed" >&2; return 1
+      --auth-root-authentication-method=normal > "$RUN/$name.init.log" 2>&1 || {
+        echo "  $name: initialisation failed (see $RUN/$name.init.log)" >&2
+        tail -5 "$RUN/$name.init.log" >&2
+        return 1
       }
   fi
 
@@ -395,10 +397,26 @@ start_server() {
   local deadline=$((SECONDS + 60))
   while [[ $SECONDS -lt $deadline ]]; do
     if "$base/bin/mariadb" -h 127.0.0.1 -P "$port" -u root -e "SELECT 1" >/dev/null 2>&1; then
-      if [[ $fresh -eq 1 ]]; then
-        "$base/bin/mariadb" -h 127.0.0.1 -P "$port" -u root < "testservers/seed/$seed.sql" >/dev/null 2>&1 || {
-          echo "  $name: seeding failed" >&2; return 1
-        }
+      # Tracked by its own marker rather than by "did we just initialise", and
+      # the MySQL path below has carried this fix for a while: the two come apart
+      # the first time a server initialises successfully and then fails to start.
+      # On the retry the data directory already exists, `fresh` is 0, the seed
+      # silently never runs, and the server comes up with no users at all.
+      #
+      # MariaDB kept the older form purely because nobody looked at both paths at
+      # once — the same sibling-asymmetry that left MySQL's connect unbounded
+      # after Postgres's was fixed.
+      if [[ ! -f "$datadir/.seeded" ]]; then
+        # Errors to a file, not /dev/null. `mariadb118: seeding failed` with no
+        # further detail is what a CI run reported, and there was no way to learn
+        # more without another full cycle. MySQL's path has always logged this.
+        "$base/bin/mariadb" -h 127.0.0.1 -P "$port" -u root \
+          < "testservers/seed/$seed.sql" > "$RUN/$name.seed.log" 2>&1 || {
+            echo "  $name: seeding failed (see $RUN/$name.seed.log)" >&2
+            tail -5 "$RUN/$name.seed.log" >&2
+            return 1
+          }
+        touch "$datadir/.seeded"
       fi
       echo "  $name  mariadb $version  :$port"
       return 0
