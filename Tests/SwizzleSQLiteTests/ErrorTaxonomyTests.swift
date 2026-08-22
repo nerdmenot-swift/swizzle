@@ -303,40 +303,48 @@ extension QueryTimeoutTests {
     /// stopwatch test above cancels while the slow query is *already stepping*,
     /// so the interrupt lands, and it passes on any machine quick enough to have
     /// started it. That is why it passed locally for months and failed on
-    /// GitHub's macOS runner as `elapsed → 36.69 seconds < 10.0 seconds` — not a
-    /// slow interrupt, but one that arrived before there was anything to
-    /// interrupt, after which the query ran all 200,000,000 iterations.
+    /// GitHub's macOS runner as `elapsed → 36.69 seconds < 10.0 seconds` — the
+    /// interrupt arriving before there was anything to interrupt, after which the
+    /// query ran all 200,000,000 iterations.
     ///
-    /// ## Why this asserts a side effect rather than a duration
+    /// ## Two things this test got wrong before getting them right
     ///
-    /// The first version of this test blocked the queue with a slow *query* and
-    /// timed a `SELECT 1`. It passed — and passed just as happily with the fix
-    /// removed, which is how it was caught. `interrupt()` is connection-wide, so
-    /// cancelling the `SELECT` interrupted the **blocker**, freed the queue, and
-    /// the timing said nothing about the statement under test.
+    /// It first blocked the queue with a slow *query* and timed a `SELECT 1`.
+    /// That passed with the fix removed, because `interrupt()` is
+    /// connection-wide: cancelling the `SELECT` interrupted the blocker, freed
+    /// the queue, and the timing proved nothing.
     ///
-    /// So the queue is held by a plain sleep, which SQLite cannot interrupt, and
-    /// the claim is checked directly: a statement cancelled before it starts must
-    /// **not run**. An `INSERT` leaves evidence either way.
+    /// It then blocked the queue with a plain sleep and drove cancellation from a
+    /// 50ms `withQueryTimeout`. That failed on a two-core CI runner — not
+    /// because the fix was wrong, but because a 50ms timer racing a 1.5s block is
+    /// only a 30× margin, and under that much contention `Task.sleep(50ms)` can
+    /// be delayed past the block entirely. The statement then ran normally and
+    /// both assertions failed.
+    ///
+    /// So there is no timer here at all. The task is cancelled **explicitly**,
+    /// which drives exactly the same `withTaskCancellationHandler` path a timeout
+    /// would, and the claim is checked by side effect: a statement cancelled
+    /// before it starts must not run. An `INSERT` leaves evidence either way.
     @Test("a statement cancelled before it starts never runs")
     func cancelledBeforeTheStatementBegins() async throws {
         let connection = try SQLiteConnection.inMemory()
         defer { connection.close() }
         _ = try await connection.query("CREATE TABLE marks (id INTEGER PRIMARY KEY)")
 
-        // Held by something SQLite has no idea about, so the cancellation below
-        // cannot free it.
-        connection.occupyQueueForTesting(seconds: 1.5)
+        // Held by something SQLite has no idea about, so cancellation cannot free
+        // it the way interrupting a query would.
+        connection.occupyQueueForTesting(seconds: 2)
 
-        await #expect(throws: (any Error).self) {
-            try await withQueryTimeout(.milliseconds(50)) {
-                _ = try await connection.query("INSERT INTO marks (id) VALUES (1)")
-            }
-        }
+        let insert = Task { try await connection.query("INSERT INTO marks (id) VALUES (1)") }
+        // Long enough to be queued behind the blocker on any machine. If it has
+        // not even started, cancelling still satisfies the claim under test.
+        try await Task.sleep(for: .milliseconds(250))
+        insert.cancel()
+        _ = try? await insert.value
 
-        // Wait out the blocker. If the cancelled INSERT was merely queued rather
-        // than refused, this is when it would land.
-        try await Task.sleep(for: .seconds(2))
+        // Outlast the blocker: if the cancelled statement was merely queued
+        // rather than refused, this is when it would land.
+        try await Task.sleep(for: .seconds(3))
         let rows = try await connection.query("SELECT COUNT(*) FROM marks")
         let value = rows[0].values[0]
         #expect(value == .int(0), "a statement cancelled before it began still ran: \(value)")
