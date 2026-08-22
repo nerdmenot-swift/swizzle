@@ -1,4 +1,11 @@
--- Everything in base.sql plus parsec (PBKDF2-SHA512 + ed25519), MariaDB 11.6+.
+-- Everything in base.sql plus ed25519.
+--
+-- PARSEC used to be here and is now in `optional-parsec.sql`, applied separately
+-- and allowed to fail. The x86_64 Linux builds ship the *client* plugin
+-- (`parsec.so`) without the *server* one (`auth_parsec.so`), so on that platform
+-- the plugin cannot be installed at all — and because the seed is one script,
+-- one failing `INSTALL SONAME` aborted everything after it and left two servers
+-- with no users whatsoever.
 
 -- See base.sql: a raw install leaves anonymous ''@'localhost' accounts that
 -- shadow every '%' user for localhost connections.
@@ -6,19 +13,16 @@ DELETE FROM mysql.global_priv WHERE User = '';
 FLUSH PRIVILEGES;
 
 INSTALL SONAME 'auth_ed25519';
-INSTALL SONAME 'auth_parsec';
 
 CREATE DATABASE IF NOT EXISTS swizzle_test;
 
 CREATE USER 'native'@'%'  IDENTIFIED BY 'nativepass';
 CREATE USER 'nopass'@'%'  IDENTIFIED BY '';
 CREATE USER 'ed25519'@'%' IDENTIFIED VIA ed25519 USING PASSWORD('ed25519pass');
-CREATE USER 'parsec'@'%'  IDENTIFIED VIA parsec  USING PASSWORD('parsecpass');
 
 GRANT ALL PRIVILEGES ON swizzle_test.* TO 'native'@'%';
 GRANT ALL PRIVILEGES ON swizzle_test.* TO 'nopass'@'%';
 GRANT ALL PRIVILEGES ON swizzle_test.* TO 'ed25519'@'%';
-GRANT ALL PRIVILEGES ON swizzle_test.* TO 'parsec'@'%';
 
 GRANT PROCESS ON *.* TO 'native'@'%';
 GRANT SELECT ON performance_schema.* TO 'native'@'%';
@@ -40,5 +44,4 @@ FLUSH PRIVILEGES;
 GRANT ALL PRIVILEGES ON `swizzle\_shadow\_%`.* TO 'native'@'%';
 GRANT ALL PRIVILEGES ON `swizzle\_shadow\_%`.* TO 'nopass'@'%';
 GRANT ALL PRIVILEGES ON `swizzle\_shadow\_%`.* TO 'ed25519'@'%';
-GRANT ALL PRIVILEGES ON `swizzle\_shadow\_%`.* TO 'parsec'@'%';
 FLUSH PRIVILEGES;

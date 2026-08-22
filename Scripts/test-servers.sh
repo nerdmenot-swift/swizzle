@@ -417,6 +417,27 @@ start_server() {
             return 1
           }
         touch "$datadir/.seeded"
+
+        # Optional plugins, applied separately and allowed to fail.
+        #
+        # Whether PARSEC can be installed is a property of the build, not the
+        # version: the x86_64 Linux tarballs ship the client plugin without the
+        # server one. Inside the main seed a single failing `INSTALL SONAME`
+        # aborted every statement after it, so two servers came up with no users
+        # at all and every suite against them failed for an unrelated reason.
+        #
+        # What was installed is recorded next to the data directory so the tests
+        # can gate on the fixture's real capability rather than on a version
+        # number the build does not honour.
+        : > "$datadir/.plugins"
+        if [[ -f "testservers/seed/optional-parsec.sql" && "$seed" == "parsec" ]]; then
+          if "$base/bin/mariadb" -h 127.0.0.1 -P "$port" -u root \
+               < "testservers/seed/optional-parsec.sql" > "$RUN/$name.parsec.log" 2>&1; then
+            echo "parsec" >> "$datadir/.plugins"
+          else
+            echo "  $name: parsec unavailable in this build, skipping those suites" >&2
+          fi
+        fi
       fi
       echo "  $name  mariadb $version  :$port"
       return 0
@@ -501,6 +522,27 @@ start_mysql_server() {
             echo "  $name: seeding failed (see $RUN/$name.seed.log)" >&2; return 1
           }
         touch "$datadir/.seeded"
+
+        # Optional plugins, applied separately and allowed to fail.
+        #
+        # Whether PARSEC can be installed is a property of the build, not the
+        # version: the x86_64 Linux tarballs ship the client plugin without the
+        # server one. Inside the main seed a single failing `INSTALL SONAME`
+        # aborted every statement after it, so two servers came up with no users
+        # at all and every suite against them failed for an unrelated reason.
+        #
+        # What was installed is recorded next to the data directory so the tests
+        # can gate on the fixture's real capability rather than on a version
+        # number the build does not honour.
+        : > "$datadir/.plugins"
+        if [[ -f "testservers/seed/optional-parsec.sql" && "$seed" == "parsec" ]]; then
+          if "$base/bin/mariadb" -h 127.0.0.1 -P "$port" -u root \
+               < "testservers/seed/optional-parsec.sql" > "$RUN/$name.parsec.log" 2>&1; then
+            echo "parsec" >> "$datadir/.plugins"
+          else
+            echo "  $name: parsec unavailable in this build, skipping those suites" >&2
+          fi
+        fi
       fi
       echo "  $name  mysql $version  :$port"
       return 0

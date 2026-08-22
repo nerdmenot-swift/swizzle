@@ -207,9 +207,29 @@ public enum TestServers {
     /// The newest MySQL fixture, for the same purpose.
     public static let latestMySQL = mysql91
 
-    /// Servers offering `parsec` (MariaDB 11.6+).
-    public static let withParsec = [mariadb118, mariadb122]
+    /// Servers offering `parsec`, as the fixture actually built them.
+    ///
+    /// **Read from the fixture rather than declared from a version number**,
+    /// because availability is a property of the build. MariaDB 11.6+ supports
+    /// PARSEC, but the x86_64 Linux tarballs ship only the *client* plugin
+    /// (`parsec.so`) and not the server one (`auth_parsec.so`), so on that
+    /// platform it cannot be installed at all. A hardcoded list said 11.8 and
+    /// 12.2 had it, CI disagreed, and the disagreement surfaced as a seed that
+    /// aborted and left two servers with no users whatsoever.
+    ///
+    /// `./Scripts/test-servers.sh` records what it managed to install in
+    /// `.plugins` beside each data directory. Empty here means the parsec suites
+    /// skip, which is the honest outcome on a build that cannot run them.
+    public static let withParsec: [MySQLTestServer] = [mariadb118, mariadb122]
+        .filter { hasPlugin("parsec", $0) }
 
+    static func hasPlugin(_ plugin: String, _ server: MySQLTestServer) -> Bool {
+        let path = fixtureData.appendingPathComponent("\(server.name)/.plugins")
+        guard let text = try? String(contentsOf: path, encoding: .utf8) else { return false }
+        return text.split(separator: "\n").contains {
+            $0.trimmingCharacters(in: .whitespaces) == plugin
+        }
+    }
     // MARK: - Coverage note
     //
     // Both flavours are present, and that is the point: each implements things
