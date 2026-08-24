@@ -28,6 +28,30 @@ public final class SQLiteConnection: @unchecked Sendable {
     /// calling `sqlite3_interrupt` on a freed handle.
     private let interruptLock = NSLock()
 
+    /// Read by SQLite from *inside* a running statement, every few thousand
+    /// virtual-machine instructions.
+    ///
+    /// This is what actually bounds a long query, and `sqlite3_interrupt` is not.
+    /// The interrupt is pushed from outside and is documented to do nothing when
+    /// no statement is running and to have no effect on one begun afterwards — so
+    /// it has a window it can be spent in, and on a loaded machine it lands in
+    /// that window often enough to matter. CI measured a query with a 50ms
+    /// timeout running for 36.7s, then 19.4s, then 43.9s across three attempts to
+    /// fix it from that side.
+    ///
+    /// A progress handler is polled by the statement itself, so there is no window
+    /// to miss: returning non-zero aborts the step with `SQLITE_INTERRUPT`, which
+    /// the taxonomy already maps to `.timeout`. The interrupt is kept alongside it
+    /// because it is instant when it does land; this is the guarantee underneath.
+    private let progress = ProgressState()
+
+    final class ProgressState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        var isCancelled: Bool { lock.withLock { cancelled } }
+        func set(_ value: Bool) { lock.withLock { cancelled = value } }
+    }
+
     /// Opens a database file, creating it if it does not exist.
     ///
     /// - Parameters:
@@ -57,6 +81,17 @@ public final class SQLiteConnection: @unchecked Sendable {
         queue = DispatchQueue(label: "swizzle.sqlite.\(UInt(bitPattern: Int(bitPattern: pointer)))")
 
         sqlite3_busy_timeout(handle, Int32(busyTimeout * 1000))
+        // Every 2000 VDBE instructions — often enough that a cancelled query stops
+        // promptly, rare enough that the check costs nothing measurable.
+        sqlite3_progress_handler(
+            handle, 2000,
+            { context in
+                guard let context else { return 0 }
+                return Unmanaged<ProgressState>.fromOpaque(context)
+                    .takeUnretainedValue().isCancelled ? 1 : 0
+            },
+            Unmanaged.passUnretained(progress).toOpaque()
+        )
         // Off by default, and without them every constraint failure reports the
         // same bare `SQLITE_CONSTRAINT` — so a caller cannot tell a unique
         // violation from a foreign-key one, which is exactly the distinction
@@ -278,7 +313,10 @@ public final class SQLiteConnection: @unchecked Sendable {
                         ))
                         return
                     }
-                    defer { finished.set() }
+                    // Cleared per operation: a cancellation belongs to one call, and
+                    // a flag left armed would abort whatever ran next.
+                    self.progress.set(false)
+                    defer { finished.set(); self.progress.set(false) }
                     continuation.resume(with: Result { try work() })
                 }
             }
@@ -287,35 +325,10 @@ public final class SQLiteConnection: @unchecked Sendable {
             // sees it. Interrupting first would leave a window where the flag is
             // still clear and the interrupt has already been spent.
             cancelled.set()
+            // The handler is the guarantee; the interrupt is the fast path when it
+            // happens to land.
+            self.progress.set(true)
             self.interrupt()
-
-            // And then keep interrupting until the statement actually returns.
-            //
-            // One call is not reliably enough. `sqlite3_interrupt` is documented
-            // to do nothing when no statement is running *and* to have no effect
-            // on statements started after it returns — so a single call that
-            // lands between `prepare` and the first `step` is silently spent, and
-            // the statement then runs to completion with nothing bounding it.
-            //
-            // That is not theoretical. CI reported this suite's stopwatch test at
-            // 36.7 seconds against a 10-second bound, and at 19.4 seconds after
-            // the flag above was added: better, still a statement that outran its
-            // own timeout. It has never reproduced on an unloaded machine, which
-            // is exactly what a scheduling race looks like.
-            //
-            // Repeating closes every such window without needing to know which
-            // one was hit. `sqlite3_interrupt` is safe to call repeatedly and is
-            // a no-op once the statement is gone, so the cost of a spurious call
-            // is nothing. Detached because the connection's own queue is occupied
-            // by the very statement being interrupted.
-            let deadline = 200  // ~5s at 25ms, far longer than any real teardown
-            Task.detached { [weak self] in
-                for _ in 0..<deadline {
-                    try? await Task.sleep(for: .milliseconds(25))
-                    guard let self, !finished.isSet else { return }
-                    self.interrupt()
-                }
-            }
         }
     }
 

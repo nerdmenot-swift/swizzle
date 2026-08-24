@@ -16,7 +16,7 @@ extension MySQLOnlineDDL {
         try await group.next()
         if let failure = state.failure { throw failure }
 
-        try await cutover(plan: plan, state: state)
+        try await cutover(plan: plan, state: state, stop: stop)
 
         // Ending the applier needs care: it is blocked awaiting the next event,
         // and on an idle server none may ever come. Setting the flag and then
@@ -53,7 +53,7 @@ extension MySQLOnlineDDL {
     /// No write can slip between the drain and the swap, because from step 1
     /// onwards no write runs at all, and from step 2 onwards the rename is ahead
     /// of them in the queue.
-    func cutover(plan: Plan, state: ApplierState) async throws {
+    func cutover(plan: Plan, state: ApplierState, stop: StopFlag) async throws {
         let locker = try await connect()
         defer { locker.closeImmediately() }
         let renamer = try await connect()
@@ -94,6 +94,17 @@ extension MySQLOnlineDDL {
                 [.bytes(Array(marker.utf8))]
             )
             try await waitForApplier(state, toSee: marker, plan: plan)
+
+            // Caught up, so it is done: writers are blocked, nothing new can arrive,
+            // and everything before the marker is already in the ghost.
+            //
+            // Stopping it here rather than after the swap closes a window the
+            // reordering above opened. With the rename queued last, the applier was
+            // still consuming while the swap landed — and an event for the original
+            // table arriving after it becomes a REPLACE into a ghost that no longer
+            // exists, which surfaced in CI as
+            // `Table 'swizzle_test._ddl_..._gho' doesn't exist`.
+            stop.stop()
         } catch {
             _ = try? await locker.query("UNLOCK TABLES")
             throw error
