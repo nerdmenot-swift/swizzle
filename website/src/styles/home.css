@@ -1,0 +1,71 @@
+/* The landing page only. Starlight never sees this file.
+ *
+ * Warm ground, one loud colour, generous space. The mark is a cold drink and the page
+ * should feel like one: unhurried, not shouting, with the persimmon doing all the
+ * pointing so nothing else has to.
+ */
+* { box-sizing: border-box; }
+body { margin: 0; line-height: 1.6; }
+
+.top {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; padding: 1.25rem 2rem; border-bottom: 1px solid var(--swz-rule);
+}
+.brand {
+  display: inline-flex; align-items: center; gap: .6rem;
+  font-weight: 700; font-size: 1.15rem; color: var(--swz-ink); text-decoration: none;
+}
+.top nav { display: flex; align-items: center; gap: 1.5rem; }
+.top nav a { color: var(--swz-muted); text-decoration: none; font-size: .95rem; }
+.top nav a:hover { color: var(--swz-link); }
+
+main { max-width: 52rem; margin: 0 auto; padding: 0 1.5rem 6rem; }
+section { padding: 4rem 0; border-bottom: 1px solid var(--swz-rule); }
+section:last-of-type { border-bottom: 0; }
+
+h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); line-height: 1.1; margin: 0 0 1rem; text-wrap: balance; }
+h2 { font-size: 1.8rem; margin: 0 0 .75rem; text-wrap: balance; }
+h3 { font-size: 1.15rem; margin: 0 0 .35rem; }
+h4 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--swz-muted); margin: 0 0 .5rem; }
+
+.hero { padding-top: 5rem; }
+.lede { font-size: 1.2rem; max-width: 40rem; }
+.not-orm { color: var(--swz-muted); max-width: 40rem; }
+.not-orm strong { color: var(--swz-link); }
+
+.cta { display: flex; gap: .75rem; flex-wrap: wrap; margin-top: 2rem; }
+.cta a { padding: .7rem 1.4rem; border-radius: 4px; text-decoration: none; font-weight: 600; }
+.cta .primary { background: var(--swz-persimmon); color: #fff; }
+.cta .secondary { border: 1px solid var(--swz-rule); color: var(--swz-ink); }
+
+pre {
+  background: #0F1216; color: #E6EDF3; padding: 1rem 1.15rem; border-radius: 3px;
+  overflow-x: auto; font-family: var(--swz-mono); font-size: .875rem; line-height: 1.55;
+}
+code { font-family: var(--swz-mono); }
+p code { background: var(--swz-rule); padding: .1rem .35rem; border-radius: 3px; font-size: .9em; }
+
+.aside { color: var(--swz-muted); font-size: .92rem; }
+
+.demo { margin: 2.5rem 0; }
+.dialects { display: flex; gap: .4rem; margin: 1rem 0 .5rem; }
+.dialects button {
+  font: inherit; font-size: .85rem; padding: .35rem .9rem; cursor: pointer;
+  border: 1px solid var(--swz-rule); background: transparent; color: var(--swz-muted);
+  border-radius: 999px;
+}
+.dialects button.on { background: var(--swz-persimmon); border-color: var(--swz-persimmon); color: #fff; }
+pre.hidden { display: none; }
+
+/* The aqua earns its place here and nowhere else: it is the one cool note in a warm
+   palette, so it marks the one thing on the page that is a different kind of claim. */
+.streaming h2 { border-left: 4px solid var(--swz-aqua); padding-left: .75rem; margin-left: -1rem; }
+
+.split { display: grid; gap: 1.25rem; grid-template-columns: 1fr; }
+@media (min-width: 44rem) { .split { grid-template-columns: 1fr 1fr; } }
+
+.honest ul { padding-left: 1.1rem; }
+.honest li { margin: .5rem 0; }
+
+footer { max-width: 52rem; margin: 0 auto; padding: 2rem 1.5rem 4rem; color: var(--swz-muted); font-size: .92rem; }
+footer a { color: var(--swz-link); }

@@ -1,0 +1,59 @@
+/* Swizzle's palette, taken from the mark.
+ *
+ * The logo is a cold drink: persimmon liquid, a yellow straw, aqua ice, on cream paper.
+ * The site uses the same five, which is why it needs no separate brand palette — if the
+ * icon changes, this changes with it.
+ *
+ * Brand colours answer to the eye. Text colours are held to WCAG AA against their own
+ * ground; where a brand colour is too light to carry text, a darker sibling is used for
+ * the text role and the brand value is kept for fills only. Decoy learned that the hard
+ * way with its teal, and the same rule applies here.
+ */
+:root {
+  --swz-persimmon: #E4573D;
+  --swz-yellow: #F2C14E;
+  --swz-aqua: #7FD1D8;
+  --swz-aubergine: #332028;
+  --swz-cream: #F7F1E3;
+
+  --swz-sans: 'Public Sans', system-ui, -apple-system, sans-serif;
+  --swz-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+
+  /* Light ground */
+  --swz-paper: #FBF7EE;
+  --swz-ink: #2A1A20;
+  --swz-muted: #6B5A5F;
+  --swz-rule: #E7DECB;
+  /* #E4573D measures below 4.5:1 on cream, so links use a darker persimmon and the
+     brand value stays on fills. */
+  --swz-link: #B83D26;
+}
+
+:root[data-theme='dark'] {
+  --swz-paper: #171114;
+  --swz-ink: #F2EAE0;
+  --swz-muted: #B29FA6;
+  --swz-rule: #33242B;
+  --swz-link: #FF8A6B;
+}
+
+/* Starlight's own tokens, pointed at ours so the docs pages and the landing page are
+   one design rather than two that happen to share a logo. */
+:root {
+  --sl-font: var(--swz-sans);
+  --sl-font-mono: var(--swz-mono);
+  --sl-color-accent: var(--swz-link);
+  --sl-color-accent-high: var(--swz-link);
+  --sl-color-text-accent: var(--swz-link);
+  --sl-color-bg: var(--swz-paper);
+  --sl-color-text: var(--swz-ink);
+  --sl-color-gray-3: var(--swz-muted);
+  --sl-color-hairline: var(--swz-rule);
+  --sl-content-width: 48rem;
+}
+
+body {
+  background: var(--swz-paper);
+  color: var(--swz-ink);
+  font-family: var(--swz-sans);
+}

@@ -1,0 +1,46 @@
+---
+/**
+ * Starlight's own header is one of its loudest tells: centred title lockup, its own
+ * spacing, its own social row. This is the site's header instead, so the docs pages and
+ * the landing page read as one thing.
+ *
+ * The brand is an icon plus live text rather than a lockup SVG, because Swizzle does not
+ * have a finished wordmark yet. When it does, swap both for the lockup — decoy's header
+ * does exactly that and is the reference.
+ */
+import Search from '@astrojs/starlight/components/Search.astro'
+import ThemeToggle from './ThemeToggle.astro'
+import TocToggle from './TocToggle.astro'
+---
+<div class="swizzle-header">
+  <a class="swizzle-brand" href="/" aria-label="Swizzle">
+    <img src="/icon.svg" alt="" width="28" height="28" />
+    <span>Swizzle</span>
+  </a>
+  <div class="swizzle-search"><Search /></div>
+  <nav class="swizzle-nav">
+    <a href="/start/install/">Install</a>
+    <a href="/guides/querying/">Guides</a>
+    <a href="/reference/cli/">Reference</a>
+    <a href="https://github.com/nerdmenot-swift/swizzle">GitHub</a>
+    <TocToggle />
+    <ThemeToggle />
+  </nav>
+</div>
+
+<style>
+  .swizzle-header {
+    display: flex; align-items: center; gap: 1rem; width: 100%;
+  }
+  .swizzle-brand {
+    display: inline-flex; align-items: center; gap: .55rem;
+    font-weight: 700; color: var(--swz-ink); text-decoration: none; white-space: nowrap;
+  }
+  .swizzle-search { flex: 1; max-width: 22rem; }
+  .swizzle-nav { display: flex; align-items: center; gap: 1.1rem; margin-left: auto; }
+  .swizzle-nav a { color: var(--swz-muted); text-decoration: none; font-size: .9rem; }
+  .swizzle-nav a:hover { color: var(--swz-link); }
+  @media (max-width: 50rem) {
+    .swizzle-nav a { display: none; }
+  }
+</style>

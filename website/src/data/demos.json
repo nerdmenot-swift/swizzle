@@ -1,0 +1,123 @@
+{
+  "generatedAt": null,
+  "demos": [
+    {
+      "id": "filter",
+      "title": "A query",
+      "blurb": "Columns are typed, so a predicate that compares a String to an Int is a compile error rather than a runtime surprise.",
+      "swift": "select(users.id, users.name, users.karma)\n    .from(users)\n    .where(users.isActive == true && users.karma >= 100)\n    .orderBy(users.karma.desc)\n    .limit(10)"
+    },
+    {
+      "id": "join",
+      "title": "A join",
+      "blurb": "Two tables, and the identifier quoting is the dialect’s own — backticks on MySQL, double quotes elsewhere.",
+      "swift": "select(posts.id, posts.title, users.name)\n    .from(posts)\n    .innerJoin(users, on: posts.authorId == users.id)\n    .where(posts.isPublished == true)\n    .orderBy(posts.createdAt.desc)\n    .limit(20)"
+    },
+    {
+      "id": "aggregate",
+      "title": "The one nobody writes by hand",
+      "blurb": "Four tables, aggregates, GROUP BY, HAVING. This is where a string-concatenation helper starts producing SQL you have to debug in a terminal.",
+      "swift": "select(users.id, users.name, countDistinct(posts.id), avg(posts.score))\n    .from(users)\n    .innerJoin(posts, on: posts.authorId == users.id)\n    .leftJoin(comments, on: comments.postId == posts.id)\n    .where(users.isActive == true && posts.isPublished == true)\n    .groupBy(users.id, users.name)\n    .having(countDistinct(posts.id) > 5)\n    .orderBy(users.name.asc)\n    .limit(100)"
+    }
+  ],
+  "dialects": [
+    "Postgres",
+    "MySQL",
+    "SQLite"
+  ],
+  "queries": [
+    {
+      "dialect": "Postgres",
+      "sql": "SELECT \"users\".\"id\", \"users\".\"name\", \"users\".\"karma\" FROM \"users\" WHERE (\"users\".\"is_active\" = $1 AND \"users\".\"karma\" >= $2) ORDER BY \"users\".\"karma\" DESC LIMIT $3",
+      "bindings": [
+        "bool(true)",
+        "int(100)",
+        "int(10)"
+      ],
+      "demo": "filter"
+    },
+    {
+      "sql": "SELECT `users`.`id`, `users`.`name`, `users`.`karma` FROM `users` WHERE (`users`.`is_active` = ? AND `users`.`karma` >= ?) ORDER BY `users`.`karma` DESC LIMIT ?",
+      "bindings": [
+        "bool(true)",
+        "int(100)",
+        "int(10)"
+      ],
+      "dialect": "MySQL",
+      "demo": "filter"
+    },
+    {
+      "dialect": "SQLite",
+      "sql": "SELECT \"users\".\"id\", \"users\".\"name\", \"users\".\"karma\" FROM \"users\" WHERE (\"users\".\"is_active\" = ? AND \"users\".\"karma\" >= ?) ORDER BY \"users\".\"karma\" DESC LIMIT ?",
+      "demo": "filter",
+      "bindings": [
+        "bool(true)",
+        "int(100)",
+        "int(10)"
+      ]
+    },
+    {
+      "bindings": [
+        "bool(true)",
+        "int(20)"
+      ],
+      "demo": "join",
+      "sql": "SELECT \"posts\".\"id\", \"posts\".\"title\", \"users\".\"name\" FROM \"posts\" INNER JOIN \"users\" ON \"posts\".\"author_id\" = \"users\".\"id\" WHERE \"posts\".\"is_published\" = $1 ORDER BY \"posts\".\"created_at\" DESC LIMIT $2",
+      "dialect": "Postgres"
+    },
+    {
+      "sql": "SELECT `posts`.`id`, `posts`.`title`, `users`.`name` FROM `posts` INNER JOIN `users` ON `posts`.`author_id` = `users`.`id` WHERE `posts`.`is_published` = ? ORDER BY `posts`.`created_at` DESC LIMIT ?",
+      "demo": "join",
+      "dialect": "MySQL",
+      "bindings": [
+        "bool(true)",
+        "int(20)"
+      ]
+    },
+    {
+      "demo": "join",
+      "dialect": "SQLite",
+      "bindings": [
+        "bool(true)",
+        "int(20)"
+      ],
+      "sql": "SELECT \"posts\".\"id\", \"posts\".\"title\", \"users\".\"name\" FROM \"posts\" INNER JOIN \"users\" ON \"posts\".\"author_id\" = \"users\".\"id\" WHERE \"posts\".\"is_published\" = ? ORDER BY \"posts\".\"created_at\" DESC LIMIT ?"
+    },
+    {
+      "sql": "SELECT \"users\".\"id\", \"users\".\"name\", COUNT(DISTINCT \"posts\".\"id\"), AVG(\"posts\".\"score\") FROM \"users\" INNER JOIN \"posts\" ON \"posts\".\"author_id\" = \"users\".\"id\" LEFT JOIN \"comments\" ON \"comments\".\"post_id\" = \"posts\".\"id\" WHERE (\"users\".\"is_active\" = $1 AND \"posts\".\"is_published\" = $2) GROUP BY \"users\".\"id\", \"users\".\"name\" HAVING COUNT(DISTINCT \"posts\".\"id\") > $3 ORDER BY \"users\".\"name\" LIMIT $4",
+      "dialect": "Postgres",
+      "bindings": [
+        "bool(true)",
+        "bool(true)",
+        "int(5)",
+        "int(100)"
+      ],
+      "demo": "aggregate"
+    },
+    {
+      "sql": "SELECT `users`.`id`, `users`.`name`, COUNT(DISTINCT `posts`.`id`), AVG(`posts`.`score`) FROM `users` INNER JOIN `posts` ON `posts`.`author_id` = `users`.`id` LEFT JOIN `comments` ON `comments`.`post_id` = `posts`.`id` WHERE (`users`.`is_active` = ? AND `posts`.`is_published` = ?) GROUP BY `users`.`id`, `users`.`name` HAVING COUNT(DISTINCT `posts`.`id`) > ? ORDER BY `users`.`name` LIMIT ?",
+      "dialect": "MySQL",
+      "demo": "aggregate",
+      "bindings": [
+        "bool(true)",
+        "bool(true)",
+        "int(5)",
+        "int(100)"
+      ]
+    },
+    {
+      "bindings": [
+        "bool(true)",
+        "bool(true)",
+        "int(5)",
+        "int(100)"
+      ],
+      "sql": "SELECT \"users\".\"id\", \"users\".\"name\", COUNT(DISTINCT \"posts\".\"id\"), AVG(\"posts\".\"score\") FROM \"users\" INNER JOIN \"posts\" ON \"posts\".\"author_id\" = \"users\".\"id\" LEFT JOIN \"comments\" ON \"comments\".\"post_id\" = \"posts\".\"id\" WHERE (\"users\".\"is_active\" = ? AND \"posts\".\"is_published\" = ?) GROUP BY \"users\".\"id\", \"users\".\"name\" HAVING COUNT(DISTINCT \"posts\".\"id\") > ? ORDER BY \"users\".\"name\" LIMIT ?",
+      "dialect": "SQLite",
+      "demo": "aggregate"
+    }
+  ],
+  "migration": "-- The ordinary case: a schema change, reversible, nothing special.\n--\n-- The directive form is goose's, deliberately. A plain SQL file with comment\n-- directives stays runnable by `psql` or `mysql` directly, which is what matters\n-- when a migration goes wrong at 3am and somebody has to apply half of it by\n-- hand.\n\n-- +swizzle Up\nCREATE TABLE users (\n    id          BIGINT PRIMARY KEY,\n    email       TEXT NOT NULL,\n    display_name TEXT,\n    created_at  TIMESTAMP NOT NULL\n);\n\nCREATE UNIQUE INDEX users_email_idx ON users (email);\n\n-- +swizzle Down\nDROP TABLE users;\n",
+  "queryFile": "-- The query file, and every directive that exists.\n--\n-- Placeholders are SQLite's own `?` rather than a portable invention, for the\n-- same reason the migration format keeps its SQL plain: this file stays runnable\n-- by hand. Paste any statement below into `sqlite3` and it works.\n\n-- The ordinary case. `id` and `title` are `NOT NULL` in the schema and come back\n-- non-optional; `body` is not and comes back `String?`. Nobody wrote that down —\n-- the database was asked.\n-- +swizzle Query GetNote(id: Int64) :one\nSELECT id, title, body FROM notes WHERE id = ?;\n\n-- +swizzle Query ListByAuthor(authorID: Int64) :many\nSELECT id, title FROM notes WHERE author_id = ? ORDER BY id;\n\n-- `Type`, and the query that makes it necessary. SQLite's `decltype` is null for\n-- every expression, so `COUNT(*)` is genuinely unknowable — it would otherwise\n-- generate as `SQLValue`. MySQL and Postgres type this themselves and need no\n-- directive, which is why it is a directive rather than a config setting.\n--\n-- The spelling carries the optionality: `Int64` here, `Int64?` if it could be\n-- null. That is Swift's vocabulary rather than one of ours.\n-- +swizzle Type n Int64\n-- +swizzle Query CountNotes :one\nSELECT COUNT(*) AS n FROM notes;\n\n-- `NotNull`, and the query that makes it necessary.\n--\n-- SQLite cannot say which side of an outer join a column came from without a\n-- parser, so a statement containing one widens *everything* to optional — the\n-- cheaper failure, but wrong for `id` and `title`, which sit on the left. Both\n-- are narrowed back. `name` is left alone, because on the right of a `LEFT JOIN`\n-- it genuinely can be null, and that is the case the widening exists for.\n-- +swizzle NotNull id\n-- +swizzle NotNull title\n-- +swizzle Query NotesWithAuthor :many\nSELECT n.id, n.title, a.name\nFROM notes n\nLEFT JOIN authors a ON a.id = n.author_id\nORDER BY n.id;\n\n-- `:stream` has no sqlc equivalent. It generates into a separate extension\n-- constrained to `SQLStreamingExecutor`, so on a backend that cannot stream the\n-- method does not exist rather than failing when it is called.\n-- +swizzle Query StreamTitles :stream\nSELECT title FROM notes ORDER BY id;\n\n-- `:exec` returns the rows affected.\n-- +swizzle Query DeleteNote(id: Int64) :exec\nDELETE FROM notes WHERE id = ?;\n",
+  "generated": "// Generated by swizzle. Do not edit.\n//\n// Regenerate with `swizzle generate queries`. Edits are lost on the next run;\n// change the migration instead, which is the source of truth this was read from.\n\nimport SwizzleCore\n\n/// One row of `GetNote`.\npublic struct GetNoteRow: Sendable {\n    public let id: Int64\n    public let title: String\n    public let body: String?\n\n    public init(row: SQLRow) throws {\n        self.id = try Int64(sqlValue: row.values[0])\n        self.title = try String(sqlValue: row.values[1])\n        self.body = try String?(sqlValue: row.values[2])\n    }\n}\n\n/// One row of `ListByAuthor`.\npublic struct ListByAuthorRow: Sendable {\n    public let id: Int64\n    public let title: String\n\n    public init(row: SQLRow) throws {\n        self.id = try Int64(sqlValue: row.values[0])\n        self.title = try String(sqlValue: row.values[1])\n    }\n}\n\n/// One row of `NotesWithAuthor`.\npublic struct NotesWithAuthorRow: Sendable {\n    public let id: Int64\n    public let title: String\n    public let name: String?\n\n    public init(row: SQLRow) throws {\n        self.id = try Int64(sqlValue: row.values[0])\n        self.title = try String(sqlValue: row.values[1])\n        self.name = try String?(sqlValue: row.values[2])\n    }\n}\n\n/// Every query in the directory, bound to one connection.\n///\n/// Generic over the executor and pinned to the dialect these queries were\n/// analysed against, so handing them a connection to a different engine is a\n/// compile error rather than a syntax error from a server.\npublic struct Queries<Executor: SQLExecutor>: Sendable\nwhere Executor.Dialect == SQLite {\n    public let executor: Executor\n\n    public init(_ executor: Executor) {\n        self.executor = executor\n    }\n}\n\nextension Queries {\n\n    /// `notes.sql` — at most one row\n    public func getNote(id: Int64) async throws -> GetNoteRow? {\n        let bindings: [SQLValue] = [id.sqlValue]\n        let rows = try await executor.execute(\n            sql: #\"\"\"\n        SELECT id, title, body FROM notes WHERE id = ?\n        \"\"\"#, bindings: bindings\n        )\n        guard let row = rows.first else { return nil }\n        return try GetNoteRow(row: row)\n    }\n\n    /// `notes.sql` — every matching row\n    public func listByAuthor(authorID: Int64) async throws -> [ListByAuthorRow] {\n        let bindings: [SQLValue] = [authorID.sqlValue]\n        let rows = try await executor.execute(\n            sql: #\"\"\"\n        SELECT id, title FROM notes WHERE author_id = ? ORDER BY id\n        \"\"\"#, bindings: bindings\n        )\n        return try rows.map { row in try ListByAuthorRow(row: row) }\n    }\n\n    /// `notes.sql` — at most one row\n    public func countNotes() async throws -> Int64? {\n        let bindings: [SQLValue] = []\n        let rows = try await executor.execute(\n            sql: #\"\"\"\n        SELECT COUNT(*) AS n FROM notes\n        \"\"\"#, bindings: bindings\n        )\n        guard let row = rows.first else { return nil }\n        return try Int64(sqlValue: row.values[0])\n    }\n\n    /// `notes.sql` — every matching row\n    public func notesWithAuthor() async throws -> [NotesWithAuthorRow] {\n        let bindings: [SQLValue] = []\n        let rows = try await executor.execute(\n            sql: #\"\"\"\n        SELECT n.id, n.title, a.name\n        FROM notes n\n        LEFT JOIN authors a ON a.id = n.author_id\n        ORDER BY n.id\n        \"\"\"#, bindings: bindings\n        )\n        return try rows.map { row in try NotesWithAuthorRow(row: row) }\n    }\n\n    /// `notes.sql` — rows affected\n    public func deleteNote(id: Int64) async throws -> Int {\n        let bindings: [SQLValue] = [id.sqlValue]\n        return try await executor.executeUpdate(\n            sql: #\"\"\"\n        DELETE FROM notes WHERE id = ?\n        \"\"\"#, bindings: bindings\n        )\n    }\n}\n\n// Streaming needs more of an executor than running does, so these live\n// behind the tighter constraint: a query declared `:stream` simply does\n// not exist on a backend that cannot stream, rather than failing when\n// it is called.\nextension Queries where Executor: SQLStreamingExecutor {\n\n    /// `notes.sql` — rows as they arrive, in bounded memory\n    public func streamTitles() async throws -> AsyncThrowingMapSequence<Executor.RowSequence, String> {\n        let bindings: [SQLValue] = []\n        let rows = try await executor.stream(\n            sql: #\"\"\"\n        SELECT title FROM notes ORDER BY id\n        \"\"\"#, bindings: bindings\n        )\n        return rows.map { row in try String(sqlValue: row.values[0]) }\n    }\n}\n"
+}

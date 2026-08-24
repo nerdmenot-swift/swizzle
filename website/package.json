@@ -1,0 +1,21 @@
+{
+  "name": "swizzle-website",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Swizzle documentation site — swizzle.nerdmenot.in",
+  "scripts": {
+    "extract": "bun run scripts/extract.ts",
+    "dev": "bun run extract && astro dev",
+    "build": "bun run extract && astro build",
+    "preview": "astro preview",
+    "deploy": "bun run build && wrangler pages deploy dist --project-name=${CLOUDFLARE_PROJECT:-swizzle-docs}"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.41.7",
+    "astro": "^7.2.1"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

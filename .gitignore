@@ -8,3 +8,10 @@ references/*
 .testservers/
 .build-linux/
 mutation-report.txt
+
+# Website
+website/node_modules/
+website/dist/
+website/.astro/
+website/.wrangler/
+.website-extract/

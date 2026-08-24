@@ -1,0 +1,195 @@
+---
+/**
+ * The landing page, deliberately outside Starlight.
+ *
+ * Ordered by what somebody evaluating a database library actually needs, which is not
+ * the order the library was built in. Nobody choosing a query builder cares that the
+ * MySQL driver was written from scratch before anything else existed — they care what a
+ * query looks like, whether it is correct on their database, and how much ceremony
+ * stands between them and a row.
+ *
+ * Every SQL string below was rendered by the real builder at build time and read out of
+ * src/data/demos.json. The migration and the generated code are the files from
+ * `examples/`, read verbatim. Nothing on this page is written by hand, because the whole
+ * claim is that one expression renders correctly per dialect and a hand-typed example
+ * would prove only that somebody once believed it.
+ */
+import demos from '../data/demos.json'
+import ThemeToggle from '../components/ThemeToggle.astro'
+import '../styles/theme.css'
+import '../styles/home.css'
+
+const dialects = demos.dialects as string[]
+const rows = (demos.queries ?? []) as {
+  demo: string; dialect: string; sql: string; bindings: string[]
+}[]
+
+/** [demo][dialect] -> sql */
+function sqlFor(demo: string, dialect: string): string {
+  return rows.find((r) => r.demo === demo && r.dialect === dialect)?.sql ?? ''
+}
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Swizzle — SQL for Swift, without the ceremony</title>
+    <meta
+      name="description"
+      content="Migrations, a typed query builder and codegen for Postgres, MySQL/MariaDB and SQLite. A query builder, not an ORM."
+    />
+    <link rel="icon" href="/icon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+    />
+  </head>
+
+  <body>
+    <header class="top">
+      <a class="brand" href="/"><img src="/icon.svg" alt="" width="32" height="32" /> Swizzle</a>
+      <nav>
+        <a href="/start/install/">Install</a>
+        <a href="/guides/querying/">Guides</a>
+        <a href="https://github.com/nerdmenot-swift/swizzle">GitHub</a>
+        <ThemeToggle />
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <h1>SQL for Swift, without the ceremony.</h1>
+        <p class="lede">
+          Migrations, a typed query builder and code generation for Postgres,
+          MySQL&nbsp;/&nbsp;MariaDB and SQLite. Your SQL stays SQL. Your types stay
+          checked. Nothing gets clever behind your back.
+        </p>
+        <p class="not-orm">
+          It is a query builder, <strong>not an ORM</strong>. There is no session, no
+          identity map, no lazy loading, and nothing that issues a query you did not ask
+          for. If you like SQL, you will recognise everything here.
+        </p>
+        <div class="cta">
+          <a class="primary" href="/start/quick-start/">Get started</a>
+          <a class="secondary" href="https://github.com/nerdmenot-swift/swizzle">Read the source</a>
+        </div>
+      </section>
+
+      <section class="install">
+        <h2>Install</h2>
+        <pre><code>.package(url: "https://github.com/nerdmenot-swift/swizzle", from: "0.1.0")</code></pre>
+      </section>
+
+      <section class="demos">
+        <h2>One expression, three databases</h2>
+        <p>
+          This is the part worth being fussy about. The same Swift renders to the SQL each
+          database actually wants — its own quoting, its own placeholders, its own
+          dialect. Switch the tabs and watch it change.
+        </p>
+        <p class="aside">
+          Every string below came out of the builder when this page was built. If the
+          renderer changes, this page changes. There are no screenshots here to go stale.
+        </p>
+
+        {demos.demos.map((demo: any) => (
+          <article class="demo">
+            <h3>{demo.title}</h3>
+            <p>{demo.blurb}</p>
+            <pre class="swift"><code>{demo.swift}</code></pre>
+            <div class="dialects" data-demo={demo.id}>
+              {dialects.map((d, i) => (
+                <button data-dialect={d} class={i === 0 ? 'on' : ''}>{d}</button>
+              ))}
+            </div>
+            {dialects.map((d, i) => (
+              <pre class:list={['sql', { hidden: i !== 0 }]} data-demo={demo.id} data-dialect={d}
+                ><code>{sqlFor(demo.id, d)}</code></pre>
+            ))}
+          </article>
+        ))}
+      </section>
+
+      <section class="migrations">
+        <h2>Migrations are just SQL files</h2>
+        <p>
+          No DSL to learn and nothing to regenerate. A migration is a file with two
+          comments in it, which means when something goes wrong at 3am you can open it and
+          run half of it by hand — which is exactly when you will want to.
+        </p>
+        <pre><code>{demos.migration}</code></pre>
+        <p class="aside">
+          That file is <code>examples/migrations/00001_create_users.sql</code>, read off
+          disk. It is in the test suite, so it cannot rot.
+        </p>
+      </section>
+
+      <section class="codegen">
+        <h2>Write SQL, get Swift</h2>
+        <p>
+          Point Swizzle at a directory of <code>.sql</code> files and it writes the typed
+          functions for you — argument names, row structs, optionality and all. It works
+          out the types by <em>asking your database</em> rather than parsing your SQL,
+          which is why there is no query parser here to disagree with the server.
+        </p>
+        <div class="split">
+          <div>
+            <h4>You write</h4>
+            <pre><code>{demos.queryFile?.split('\n').slice(0, 14).join('\n')}</code></pre>
+          </div>
+          <div>
+            <h4>You get</h4>
+            <pre><code>{demos.generated?.split('\n').slice(5, 20).join('\n')}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="streaming">
+        <h2>Streaming that actually streams</h2>
+        <p>
+          A million rows should not become a million rows in memory. Results arrive as an
+          <code>AsyncSequence</code> with real backpressure — stop consuming and the
+          driver stops reading from the socket. It is not a convenience wrapper over an
+          array that was already fully loaded.
+        </p>
+      </section>
+
+      <section class="honest">
+        <h2>What it will not do</h2>
+        <ul>
+          <li>Guess your schema. You write migrations; it reads them.</li>
+          <li>Hide the SQL. If you cannot tell what will run, that is a bug.</li>
+          <li>Issue queries you did not write. No lazy loading, no N+1 by accident.</li>
+          <li>Pretend the three databases are the same. They are not, and the types say so.</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        MIT licensed. Built by <a href="https://nerdmenot.in">nerdmenot</a>, alongside
+        <a href="https://decoy.nerdmenot.in">Decoy</a>.
+      </p>
+    </footer>
+
+    <script is:inline>
+      // Tab switching, written out rather than pulled from a framework: it is eleven
+      // lines and the alternative is shipping a runtime to a page of static text.
+      for (const group of document.querySelectorAll('.dialects')) {
+        group.addEventListener('click', (event) => {
+          const button = event.target.closest('button')
+          if (!button) return
+          const demo = group.dataset.demo
+          const chosen = button.dataset.dialect
+          for (const b of group.querySelectorAll('button')) b.classList.toggle('on', b === button)
+          for (const pre of document.querySelectorAll(`pre.sql[data-demo="${demo}"]`)) {
+            pre.classList.toggle('hidden', pre.dataset.dialect !== chosen)
+          }
+        })
+      }
+    </script>
+  </body>
+</html>
