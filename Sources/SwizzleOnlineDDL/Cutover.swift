@@ -67,9 +67,43 @@ extension MySQLOnlineDDL {
         //    anyway — this just keeps the two consistent.
         _ = try await locker.query("LOCK TABLES `\(plan.table)` WRITE")
 
-        // 2. Queue the rename behind the lock. It cannot be awaited here — it
-        //    blocks until the lock is released — so it runs detached and is
-        //    joined after the unlock.
+        let marker = "cutover-\(UInt64.random(in: 0..<UInt64.max))"
+        do {
+            // 2. Drain, **before the rename is queued**, and that order is the
+            //    whole of a deadlock this used to hit.
+            //
+            //    The rename covers the ghost table, so once it is queued it holds
+            //    a metadata lock request over it. The applier's entire job during
+            //    the drain is writing pending row changes *into* the ghost — so
+            //    those writes queued behind the pending rename, the rename waited
+            //    for the unlock, and the unlock waited for the drain. Nothing
+            //    could move.
+            //
+            //    It presented as a slow applier and it is not one: at a 30-second
+            //    timeout it read 1079 binlog events, and at 120 seconds it read
+            //    1071. Four times the patience, no further progress — which is a
+            //    stall, and the reason raising the timeout was the wrong fix.
+            //    It only fires when there is something to apply, which is why the
+            //    one test that writes during the copy was the one that failed.
+            //
+            //    Draining first is safe because writers are already blocked by the
+            //    lock above: no new changes can arrive while this runs, so the
+            //    applier only has to catch up on what is already in the binlog.
+            _ = try await marking.query(
+                "INSERT INTO `\(plan.changelog)` (marker) VALUES (?)",
+                [.bytes(Array(marker.utf8))]
+            )
+            try await waitForApplier(state, toSee: marker, plan: plan)
+        } catch {
+            _ = try? await locker.query("UNLOCK TABLES")
+            throw error
+        }
+
+        // 3. Now queue the rename behind the lock. It cannot be awaited here — it
+        //    blocks until the lock is released — so it runs detached and is joined
+        //    after the unlock. Queueing it while the lock is still held is what
+        //    puts it ahead of every writer waiting on that lock, which is the
+        //    property the whole sequence exists for.
         let rename = Task {
             try await renamer.query(
                 "RENAME TABLE `\(plan.table)` TO `\(plan.retired)`, "
@@ -77,32 +111,10 @@ extension MySQLOnlineDDL {
             )
         }
 
-        // Give the rename a moment to reach the server and enqueue. Releasing
-        // the lock before it arrives would let a waiting writer in first, which
-        // is the race this whole dance exists to avoid.
+        // Give the rename a moment to reach the server and enqueue. Releasing the
+        // lock before it arrives would let a waiting writer in first, which is the
+        // race this dance exists to avoid.
         try await Task.sleep(for: .milliseconds(100))
-
-        do {
-            // 3. Drain. The marker is written *after* writers are blocked, so
-            //    every change to the original is already ahead of it in the
-            //    binlog. When the applier reports seeing it, everything before
-            //    it has been applied.
-            //
-            //    This replaced comparing binlog positions, which could not work:
-            //    on a table nobody is writing to, no events arrive and the
-            //    applier's position never moves, so the wait could only ever
-            //    time out.
-            let marker = "cutover-\(UInt64.random(in: 0..<UInt64.max))"
-            _ = try await marking.query(
-                "INSERT INTO `\(plan.changelog)` (marker) VALUES (?)",
-                [.bytes(Array(marker.utf8))]
-            )
-            try await waitForApplier(state, toSee: marker, plan: plan)
-        } catch {
-            rename.cancel()
-            _ = try? await locker.query("UNLOCK TABLES")
-            throw error
-        }
 
         // 4. Release; the rename runs first.
         _ = try await locker.query("UNLOCK TABLES")
@@ -110,6 +122,7 @@ extension MySQLOnlineDDL {
         do {
             _ = try await rename.value
         } catch {
+            rename.cancel()
             throw OnlineDDLError.failed("the rename did not complete: \(error)")
         }
 

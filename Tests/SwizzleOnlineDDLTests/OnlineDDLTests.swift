@@ -60,23 +60,14 @@ struct OnlineDDLTests {
         configuration.chunkSize = chunkSize
         configuration.pauseBetweenChunks = pause
         configuration.serverID = UInt32.random(in: 900_000..<999_999)
-        // The production default is 30 seconds and stays 30 seconds. These tests
-        // are not about the timeout — they are about writes surviving the copy —
-        // and they inherit a *policy* knob that has nothing to do with what they
-        // assert.
+        // The production default, deliberately not raised.
         //
-        // Inheriting it made them fail on a two-core CI runner that was also
-        // hosting six database servers and running 1437 tests in parallel. The
-        // error said exactly what was happening, which is why this is a
-        // configuration change rather than a hunt: "It applied 0 changes and read
-        // 1079 binlog events while draining. Many events and no marker means a
-        // backlog." The applier was working the whole time and simply had further
-        // to go than thirty seconds allowed.
-        //
-        // Raising it here does not weaken any assertion: `waitForApplier` still
-        // has to reach the marker, and `OnlineDDLCutoverWaitTests` covers the
-        // deadline itself directly with its own short values.
-        configuration.cutoverTimeout = .seconds(120)
+        // It was briefly set to 120 seconds on the theory that a loaded CI runner
+        // needed more room. That was wrong, and the numbers said so: at 30
+        // seconds the applier read 1079 binlog events, at 120 it read 1071. Four
+        // times the patience and no further progress is a stall, not a backlog —
+        // the cutover was deadlocking against its own pending rename. Running at
+        // the real default is what keeps that honest.
         return MySQLOnlineDDL(
             connect: { try await OnlineTestSupport.connect() },
             configuration: configuration
@@ -364,9 +355,6 @@ struct OnlineMigrationTests {
         engine.chunkSize = 100
         engine.pauseBetweenChunks = .milliseconds(2)
         engine.serverID = UInt32.random(in: 900_000..<999_999)
-        // Same reason as `OnlineDDLTests.engine`: a loaded CI runner needs more
-        // than the production default, and this suite is not testing the deadline.
-        engine.cutoverTimeout = .seconds(120)
 
         let migrator = Migrator(
             executor: try connection.executor(MariaDB.self),

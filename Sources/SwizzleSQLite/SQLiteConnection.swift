@@ -214,15 +214,15 @@ public final class SQLiteConnection: @unchecked Sendable {
 
     // MARK: - The queue hop
 
-    /// A per-operation cancellation flag.
+    /// A one-way flag belonging to a single `withQueue` call.
     ///
-    /// Not on the connection: it belongs to one `withQueue` call, and a
-    /// connection-wide flag would leave a cancelled query poisoning the next one.
-    private final class CancellationFlag: @unchecked Sendable {
+    /// Not on the connection: connection-wide state would let a cancelled query
+    /// poison the next one.
+    private final class Flag: @unchecked Sendable {
         private let lock = NSLock()
         private var value = false
-        var isCancelled: Bool { lock.withLock { value } }
-        func mark() { lock.withLock { value = true } }
+        var isSet: Bool { lock.withLock { value } }
+        func set() { lock.withLock { value = true } }
     }
 
     private func withQueue<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
@@ -255,7 +255,8 @@ public final class SQLiteConnection: @unchecked Sendable {
         // The flag closes it from the other side. Either the step is already
         // running, and the interrupt stops it, or it has not started, and this
         // refuses to start it.
-        let cancelled = CancellationFlag()
+        let cancelled = Flag()
+        let finished = Flag()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 queue.async {
@@ -265,7 +266,7 @@ public final class SQLiteConnection: @unchecked Sendable {
                         ))
                         return
                     }
-                    guard !cancelled.isCancelled else {
+                    guard !cancelled.isSet else {
                         // Reported as an interrupt rather than as a cancellation
                         // so it lands in the taxonomy where an interrupted step
                         // does — the caller cannot tell the two apart and should
@@ -277,6 +278,7 @@ public final class SQLiteConnection: @unchecked Sendable {
                         ))
                         return
                     }
+                    defer { finished.set() }
                     continuation.resume(with: Result { try work() })
                 }
             }
@@ -284,8 +286,36 @@ public final class SQLiteConnection: @unchecked Sendable {
             // Order matters: the flag first, so a step that is about to start
             // sees it. Interrupting first would leave a window where the flag is
             // still clear and the interrupt has already been spent.
-            cancelled.mark()
+            cancelled.set()
             self.interrupt()
+
+            // And then keep interrupting until the statement actually returns.
+            //
+            // One call is not reliably enough. `sqlite3_interrupt` is documented
+            // to do nothing when no statement is running *and* to have no effect
+            // on statements started after it returns — so a single call that
+            // lands between `prepare` and the first `step` is silently spent, and
+            // the statement then runs to completion with nothing bounding it.
+            //
+            // That is not theoretical. CI reported this suite's stopwatch test at
+            // 36.7 seconds against a 10-second bound, and at 19.4 seconds after
+            // the flag above was added: better, still a statement that outran its
+            // own timeout. It has never reproduced on an unloaded machine, which
+            // is exactly what a scheduling race looks like.
+            //
+            // Repeating closes every such window without needing to know which
+            // one was hit. `sqlite3_interrupt` is safe to call repeatedly and is
+            // a no-op once the statement is gone, so the cost of a spurious call
+            // is nothing. Detached because the connection's own queue is occupied
+            // by the very statement being interrupted.
+            let deadline = 200  // ~5s at 25ms, far longer than any real teardown
+            Task.detached { [weak self] in
+                for _ in 0..<deadline {
+                    try? await Task.sleep(for: .milliseconds(25))
+                    guard let self, !finished.isSet else { return }
+                    self.interrupt()
+                }
+            }
         }
     }
 
