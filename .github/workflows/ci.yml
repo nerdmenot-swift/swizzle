@@ -127,8 +127,24 @@ jobs:
       # The static SDK links musl rather than glibc, so anything reaching for a
       # glibc-shaped symbol fails here and not in production. It is also the one
       # configuration that produces a binary with no runtime dependencies.
+      # Retried, because the installer itself is what fails. On one run it
+      # segfaulted mid-install (exit 139, after printing a Swift backtrace) while
+      # the aarch64 job installed the identical SDK from the identical URL without
+      # complaint. That is a crash in the toolchain, not a fact about this
+      # repository, and a job that goes red for it teaches people to ignore the
+      # jobs that go red for real reasons.
       - name: Install the static Linux SDK
-        run: swift sdk install "$SDK_URL" --checksum "$SDK_CHECKSUM"
+        run: |
+          for attempt in 1 2 3; do
+            if swift sdk install "$SDK_URL" --checksum "$SDK_CHECKSUM"; then
+              exit 0
+            fi
+            echo "── SDK install failed on attempt $attempt, retrying"
+            swift sdk remove "${SDK_ID:-swift-6.3.3-RELEASE_static-linux-0.1.0}" 2>/dev/null || true
+            sleep 10
+          done
+          echo "SDK install failed three times — this is not transient" >&2
+          exit 1
 
       - name: Build
         run: swift build --swift-sdk ${{ matrix.arch }}-swift-linux-musl

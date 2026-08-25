@@ -301,6 +301,19 @@ public final class SQLiteConnection: @unchecked Sendable {
                         ))
                         return
                     }
+                    // Cleared **before** the guard below, and the order is the whole of a
+                    // race. Clearing after it leaves a window: the guard reads
+                    // `cancelled` as false, cancellation then fires and arms the
+                    // handler, and this line wipes it — after which the statement
+                    // runs with nothing polling it.
+                    //
+                    // Clearing first has no such window. A cancellation before this
+                    // point is caught by the guard; one after it leaves the flag
+                    // armed and the handler aborts the step. The clear is here at all
+                    // because the flag is per connection while a cancellation belongs
+                    // to one call, and the serial queue makes this the exact moment
+                    // the previous call is done with it.
+                    self.progress.set(false)
                     guard !cancelled.isSet else {
                         // Reported as an interrupt rather than as a cancellation
                         // so it lands in the taxonomy where an interrupted step
@@ -313,10 +326,7 @@ public final class SQLiteConnection: @unchecked Sendable {
                         ))
                         return
                     }
-                    // Cleared per operation: a cancellation belongs to one call, and
-                    // a flag left armed would abort whatever ran next.
-                    self.progress.set(false)
-                    defer { finished.set(); self.progress.set(false) }
+                    defer { finished.set() }
                     continuation.resume(with: Result { try work() })
                 }
             }
