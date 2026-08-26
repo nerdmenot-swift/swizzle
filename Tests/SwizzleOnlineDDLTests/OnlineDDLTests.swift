@@ -303,16 +303,16 @@ enum OnlineTestSupport {
 
     static func probe() -> Bool {
         let semaphore = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var reachable = false
+        let reachable = ReachabilityBox()
         Task {
             if let connection = try? await connect() {
                 connection.closeImmediately()
-                reachable = true
+                reachable.markReachable()
             }
             semaphore.signal()
         }
         _ = semaphore.wait(timeout: .now() + 5)
-        return reachable
+        return reachable.isReachable
     }
 
     static func connect() async throws -> MySQLConnection {
@@ -536,4 +536,22 @@ struct OnlineDDLCutoverWaitTests {
         }
         #expect(ContinuousClock().now - started < .seconds(10))
     }
+}
+
+/// Carries a value out of a `Task` into a synchronous caller.
+///
+/// The obvious spelling is `nonisolated(unsafe) var` captured by the task, and it
+/// compiles — on some toolchains. Swift 6.2.4 rejects it: the closure captures a
+/// mutable local, so the closure itself is non-Sendable and sending it "risks causing
+/// data races". Which is a fair description of what `nonisolated(unsafe)` does, since
+/// the annotation silences the checker rather than making the access safe.
+///
+/// A locked box makes the closure capture only Sendable things and the synchronisation
+/// real rather than asserted. Found because CI had been running Swift 6.1 while this
+/// was developed against 6.3.3 — two versions apart, and neither of them diagnosed it.
+final class ReachabilityBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isReachable: Bool { lock.withLock { value } }
+    func markReachable() { lock.withLock { value = true } }
 }
