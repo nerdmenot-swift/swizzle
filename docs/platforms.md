@@ -245,8 +245,17 @@ The static SDK is installed with a **pinned checksum**. `--checksum` is optional
 and the install works without it, which would mean a 300 MB unverified download
 on every run.
 
-Verified to build on Swift 6.1 as well as 6.3.3, so the macOS runner's default
-toolchain lagging behind is not a problem.
+Verified to build on Swift 6.1 as well as 6.3.3 — but building was never the
+question. A query timeout reported on time and failed to bound the statement on
+6.1 and nowhere else, for fifty seconds against a fifty-millisecond deadline, and
+it took six CI rounds to find because the only job that could see it was the only
+job nobody had pinned.
+
+So the matrix now runs both ends: `minimum-toolchain` on `swift:6.1`, which is the
+oldest image published for this platform and stands in for the
+`swift-tools-version: 6.0` the package claims, and the macOS job on the newest
+Xcode the runner image carries. Pinning only the newest would have removed the
+coverage that found the bug — which is exactly what the first attempt at this did.
 
 ### What CI does not cover
 

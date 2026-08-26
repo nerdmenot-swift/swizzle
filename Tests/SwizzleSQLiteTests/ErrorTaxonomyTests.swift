@@ -276,7 +276,7 @@ extension QueryTimeoutTests {
                     _ = try await connection.query(
                         """
                         WITH RECURSIVE slow(n) AS (
-                            SELECT 1 UNION ALL SELECT n + 1 FROM slow WHERE n < 200000000
+                            SELECT 1 UNION ALL SELECT n + 1 FROM slow WHERE n < 4000000000
                         )
                         SELECT COUNT(*) FROM slow
                         """
@@ -292,10 +292,15 @@ extension QueryTimeoutTests {
         let elapsed = ContinuousClock.now - started
 
         #expect(thrown is SQLTimeoutError, "expected a timeout, got \(String(describing: thrown))")
-        // Ten seconds against a statement that runs for **34 seconds** unbounded on
-        // the machine this was written on — measured, not assumed. So the bound
-        // discriminates "the abort landed" from "the query ran to completion", and
-        // nothing in between.
+        // Sixty seconds against a statement that counts to four billion — measured at
+        // 34 seconds for a *fifth* of that count on the machine this was written on,
+        // so unbounded it runs for many minutes anywhere.
+        //
+        // The earlier version counted to two hundred million and asserted under ten
+        // seconds, and failed CI at 19.1s, 20.6s, 25.9s — numbers that are neither
+        // "the abort landed" nor "the query ran to completion". A bound that cannot
+        // tell its two outcomes apart is measuring the machine, and this suite has
+        // now learned that four times.
         //
         // It has failed in CI at 36.7s, 43.9s, 25.9s and 20.6s while passing here in
         // 0.05s, including under full parallel load. Four attempts to fix it from
@@ -306,7 +311,7 @@ extension QueryTimeoutTests {
         // time alone, because the next occurrence should say what happened rather
         // than prompt another round of reasoning from the machine that works.
         #expect(
-            elapsed < .seconds(10),
+            elapsed < .seconds(60),
             """
             took \(elapsed) — the statement was waited out, not aborted.
               thrown by the timeout: \(String(describing: thrown))
@@ -425,16 +430,23 @@ struct QueryTimeoutCancellationTests {
         #expect(cancelled.isSet, "the deadline fired but the work was never cancelled")
     }
 
-    /// And it returns promptly rather than waiting the body out. A loose bound, because
-    /// the discrimination here is between "immediately" and "thirty seconds" — not a
-    /// measurement of either.
+    /// And it returns rather than waiting the body out.
+    ///
+    /// Ten minutes of abandoned work against a one-minute bound, and the gap is
+    /// deliberate. The first version slept thirty seconds and asserted under ten,
+    /// which failed CI at 19.1s — a number that is neither "returned promptly" nor
+    /// "waited out the sleep", so the assertion could not tell the two apart and
+    /// was really measuring the runner.
+    ///
+    /// At these values there is no scheduling delay that blurs them: returning
+    /// takes milliseconds, and waiting takes ten minutes.
     @Test("it does not wait for the abandoned work")
     func returnsWithoutAwaitingTheBody() async {
         let started = ContinuousClock.now
         _ = try? await withQueryTimeout(.milliseconds(50)) {
-            try? await Task.sleep(for: .seconds(30))
+            try? await Task.sleep(for: .seconds(600))
         }
-        #expect(ContinuousClock.now - started < .seconds(10))
+        #expect(ContinuousClock.now - started < .seconds(60))
     }
 
     /// The success path is untouched: a body that finishes first still returns its value

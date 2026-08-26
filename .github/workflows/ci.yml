@@ -106,6 +106,45 @@ jobs:
         if: always()
         run: tail -n 50 .testservers/run-linux-*/*.log || true
 
+
+  # The oldest Swift this package claims to support.
+  #
+  # `swift-tools-version: 6.0` is a promise, and until now nothing checked it:
+  # every Linux job pins 6.3.3 and the macOS job takes the newest Xcode on the
+  # image. The whole matrix tested the toolchain the author happened to use.
+  #
+  # That is not hypothetical. A query timeout reported on time and failed to stop
+  # the statement — for fifty seconds against a fifty-millisecond deadline — on
+  # Swift 6.1 and nowhere else, and it took six CI rounds to find because the one
+  # job that could see it was the one job nobody had pinned. Pinning macOS to the
+  # newest Xcode then *removed* that coverage, which is the opposite of the fix.
+  #
+  # So this job runs the floor. If it goes red, either the code needs to work
+  # there or the floor needs to move — and both are decisions worth making
+  # deliberately rather than discovering from a user.
+  #
+  # 6.1 rather than 6.0 because that is the oldest image Swift publishes for this
+  # platform; the tools version is the older promise and the gap is noted in
+  # docs/platforms.md.
+  minimum-toolchain:
+    name: Oldest supported Swift (6.1)
+    runs-on: ubuntu-latest
+    container: swift:6.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Which toolchain
+        run: swift --version
+
+      - name: Build
+        run: swift build --build-tests
+
+      # The integration suites skip here — no fixtures — but every state machine,
+      # codec, the builder and the whole SQLite suite run, which is where a
+      # version difference in the concurrency runtime would show.
+      - name: Test
+        run: swift test
+
   musl:
     name: Static musl (${{ matrix.arch }})
     runs-on: ubuntu-latest
