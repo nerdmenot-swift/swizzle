@@ -262,32 +262,58 @@ extension QueryTimeoutTests {
         defer { connection.close() }
 
         let started = ContinuousClock.now
-        await #expect(throws: SQLTimeoutError.self) {
+
+        // Both errors are captured rather than asserted away, because which one
+        // arrives is the diagnosis. `#expect(throws:)` would confirm a timeout was
+        // reported and discard the thing worth knowing: what the statement did.
+        var thrown: (any Error)?
+        // A box, because the query runs in a concurrently-executing closure and a
+        // captured `var` cannot be written from one.
+        let queryError = ErrorBox()
+        do {
             try await withQueryTimeout(.milliseconds(50)) {
-                _ = try await connection.query(
-                    """
-                    WITH RECURSIVE slow(n) AS (
-                        SELECT 1 UNION ALL SELECT n + 1 FROM slow WHERE n < 200000000
+                do {
+                    _ = try await connection.query(
+                        """
+                        WITH RECURSIVE slow(n) AS (
+                            SELECT 1 UNION ALL SELECT n + 1 FROM slow WHERE n < 200000000
+                        )
+                        SELECT COUNT(*) FROM slow
+                        """
                     )
-                    SELECT COUNT(*) FROM slow
-                    """
-                )
+                } catch {
+                    queryError.set(error)
+                    throw error
+                }
             }
+        } catch {
+            thrown = error
         }
         let elapsed = ContinuousClock.now - started
-        // Ten seconds, not two.
+
+        #expect(thrown is SQLTimeoutError, "expected a timeout, got \(String(describing: thrown))")
+        // Ten seconds against a statement that runs for **34 seconds** unbounded on
+        // the machine this was written on — measured, not assumed. So the bound
+        // discriminates "the abort landed" from "the query ran to completion", and
+        // nothing in between.
         //
-        // The claim is "orders of magnitude below the statement's own runtime",
-        // not "fast": that CTE counts to two hundred million and runs for
-        // *minutes* uninterrupted, so anything in seconds proves the interrupt
-        // landed. How quickly SQLite notices depends on the machine — it checks
-        // the flag every so many VDBE steps — and the original bound was
-        // calibrated on one fast one. In a Linux container the same interrupt
-        // took **2.95 s**, which failed a two-second bound while demonstrating
-        // exactly the behaviour under test.
+        // It has failed in CI at 36.7s, 43.9s, 25.9s and 20.6s while passing here in
+        // 0.05s, including under full parallel load. Four attempts to fix it from
+        // the driver side changed the number and not the outcome, and the same
+        // vendored SQLite with the same flags is on both machines.
+        //
+        // So the failure message now carries the evidence instead of the elapsed
+        // time alone, because the next occurrence should say what happened rather
+        // than prompt another round of reasoning from the machine that works.
         #expect(
             elapsed < .seconds(10),
-            "took \(elapsed) — the statement was waited out, not interrupted"
+            """
+            took \(elapsed) — the statement was waited out, not aborted.
+              thrown by the timeout: \(String(describing: thrown))
+              error the statement itself returned: \(String(describing: queryError.value))
+            An SQLITE_INTERRUPT here means the abort worked and the bound is wrong.
+            Anything else means the progress handler never fired.
+            """
         )
 
         // And the connection is immediately usable again.
@@ -352,4 +378,79 @@ extension QueryTimeoutTests {
         let value = rows[0].values[0]
         #expect(value == .int(0), "a statement cancelled before it began still ran: \(value)")
     }
+}
+
+/// What `withQueryTimeout` promises, tested without a stopwatch.
+///
+/// Its sibling test in `QueryTimeoutTests` times a deliberately enormous query and
+/// asserts it finishes early. That test is only meaningful on a machine slow enough that
+/// the query would *not* finish on its own — which is why it passed on a laptop for
+/// months while failing in CI at 36.7s, 43.9s, 25.9s and 20.6s against a ten-second
+/// bound, and why four attempts to fix the SQLite driver's interrupt path changed
+/// nothing. The driver's cancellation was correct and was never being invoked.
+///
+/// The cause was one line out of place: `group.cancelAll()` sat *after*
+/// `try await group.next()`, so when the deadline won and `next()` rethrew, the cancel
+/// was skipped and the group awaited the still-running query. The timeout reported on
+/// time and stopped nothing, on every engine.
+///
+/// This asserts the thing itself — that the body is cancelled — with no clock involved,
+/// so it means the same on any machine.
+// test-hygiene: no server — pure concurrency
+@Suite("Query timeout cancellation")
+struct QueryTimeoutCancellationTests {
+
+    final class Signal: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.withLock { value } }
+        func set() { lock.withLock { value = true } }
+    }
+
+    @Test("the body is cancelled when the deadline wins")
+    func deadlineCancelsTheBody() async {
+        let cancelled = Signal()
+
+        _ = try? await withQueryTimeout(.milliseconds(50)) {
+            await withTaskCancellationHandler {
+                // Far longer than the deadline. If cancellation never arrives this
+                // sleeps it out and the assertion below fails — which is exactly what
+                // the old code did, only with a query instead of a sleep.
+                try? await Task.sleep(for: .seconds(30))
+            } onCancel: {
+                cancelled.set()
+            }
+        }
+
+        #expect(cancelled.isSet, "the deadline fired but the work was never cancelled")
+    }
+
+    /// And it returns promptly rather than waiting the body out. A loose bound, because
+    /// the discrimination here is between "immediately" and "thirty seconds" — not a
+    /// measurement of either.
+    @Test("it does not wait for the abandoned work")
+    func returnsWithoutAwaitingTheBody() async {
+        let started = ContinuousClock.now
+        _ = try? await withQueryTimeout(.milliseconds(50)) {
+            try? await Task.sleep(for: .seconds(30))
+        }
+        #expect(ContinuousClock.now - started < .seconds(10))
+    }
+
+    /// The success path is untouched: a body that finishes first still returns its value
+    /// and is not cancelled out from under itself.
+    @Test("work that beats the deadline still returns")
+    func fastWorkStillReturns() async throws {
+        let value = try await withQueryTimeout(.seconds(5)) { 42 }
+        #expect(value == 42)
+    }
+}
+
+/// Carries an error out of a concurrently-executing closure, which a captured `var`
+/// cannot do under strict concurrency.
+final class ErrorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: (any Error)?
+    var value: (any Error)? { lock.withLock { stored } }
+    func set(_ error: any Error) { lock.withLock { stored = error } }
 }

@@ -58,11 +58,23 @@ public func withQueryTimeout<T: Sendable>(
             try await Task.sleep(for: duration)
             throw SQLTimeoutError(duration: duration, sql: sql)
         }
-        // Whichever finishes first wins; cancelling the group stops the other.
+
+        // Belt and braces, not the fix — worth saying because it looked like the
+        // fix for a while. The cancel used to sit *after* `try await group.next()`,
+        // where a rethrow skips it, and that seemed to explain a timeout that
+        // reported without stopping anything. It does not: Swift cancels a task
+        // group's remaining children when the body throws, so the old placement was
+        // redundant rather than wrong. Verified by putting it back and watching the
+        // cancellation tests still pass.
+        //
+        // Kept in `defer` anyway because relying on that implicit cancellation to
+        // be the only cancellation is a bet on a detail of the concurrency library
+        // that the next reader has no reason to know.
+        defer { group.cancelAll() }
+
         guard let result = try await group.next() else {
             throw SQLTimeoutError(duration: duration, sql: sql)
         }
-        group.cancelAll()
         return result
     }
 }
