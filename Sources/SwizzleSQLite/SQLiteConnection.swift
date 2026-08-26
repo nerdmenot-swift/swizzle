@@ -352,11 +352,23 @@ public final class SQLiteConnection: @unchecked Sendable {
         queue.async { Thread.sleep(forTimeInterval: seconds) }
     }
 
-    /// Stops whatever statement is running, from any thread.
+    /// Stops whatever statement is running on this connection, from any thread.
     ///
-    /// Deliberately not routed through `queue`: the whole point is to reach a
-    /// step that is currently occupying it.
-    func interrupt() {
+    /// Task cancellation already does this, so most callers never need it. It is
+    /// public for the cases cancellation does not cover: a pool aborting in-flight
+    /// work at shutdown, or a cancel button that holds a connection rather than a
+    /// `Task`. Both references expose the same capability — GRDB as `interrupt()`
+    /// on four types, rusqlite as a `Send + Sync` `InterruptHandle` — and its
+    /// absence here was an omission rather than a decision.
+    ///
+    /// The interrupted statement fails with `SQLITE_INTERRUPT`, which the taxonomy
+    /// maps to `.timeout`.
+    ///
+    /// Deliberately not routed through `queue`: the whole point is to reach a step
+    /// that is currently occupying it. `interruptLock` guards only against racing
+    /// `close()`, and is never held across a query — rusqlite documents why that
+    /// matters, since a lock held across the query would make this useless.
+    public func interrupt() {
         interruptLock.lock()
         defer { interruptLock.unlock() }
         guard isOpen else { return }

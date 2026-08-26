@@ -49,7 +49,11 @@ struct PostgresReadTimeoutTests {
             address: .tcp(host: "127.0.0.1", port: port), username: "u")
         configuration.tlsMode = .disable
         configuration.connectTimeout = .milliseconds(500)
-        configuration.readTimeout = .milliseconds(300)
+        // Two seconds, not 300ms. The idle period below still has to exceed the
+        // timeout for this to prove anything — but the *queries* need headroom too,
+        // and on a two-core runner a plain round trip can take longer than 300ms.
+        // Choosing a bound that a live connection cannot meet tests the runner.
+        configuration.readTimeout = .seconds(2)
 
         let started = ContinuousClock().now
         await #expect(throws: (any Error).self) {
@@ -68,7 +72,12 @@ struct PostgresReadTimeoutTests {
     func liveConnectionUnaffected() async throws {
         var configuration = try PostgresConnectionConfiguration(
             swizzleURL: PostgresTestServer.url)
-        configuration.readTimeout = .milliseconds(300)
+        // Two seconds, not 300ms. The idle window below still has to outlast the
+        // timeout for this to prove anything — but a live query needs headroom too,
+        // and on a two-core runner a plain round trip can exceed 300ms. This failed
+        // in CI for exactly that: `a command with no reply for 300ms` on a
+        // connection that was working perfectly.
+        configuration.readTimeout = .seconds(2)
 
         let connection = try await PostgresConnection.connect(
             configuration: configuration, on: MultiThreadedEventLoopGroup.singleton.next())
@@ -76,7 +85,7 @@ struct PostgresReadTimeoutTests {
 
         #expect(try await connection.query("SELECT 1").rows[0][0] == .int(1))
         // Idle for well over the timeout with nothing outstanding.
-        try await Task.sleep(for: .milliseconds(900))
+        try await Task.sleep(for: .seconds(5))
         #expect(connection.isActive, "an idle connection was closed by the read timeout")
         #expect(try await connection.query("SELECT 2").rows[0][0] == .int(2))
     }

@@ -15,6 +15,11 @@
 #   Deliberately absent — strong copyleft, do not clone into this project:
 #     MySQL Connector/J, MariaDB Connector/C, MariaDB Connector/J (GPL/LGPL)
 #
+# SQLite references, both permissive:
+#     rusqlite    MIT   — the closest analogue: a typed wrapper over the C API
+#     GRDB.swift  MIT   — the Swift one, and therefore the one whose absence a
+#                         Swift user will actually notice
+#
 # Postgres references are uniformly permissive — unlike MySQL, there is no
 # MPL/GPL corner of that ecosystem to route around:
 #     postgres-protocol / tokio-postgres  MIT OR Apache-2.0
@@ -55,5 +60,9 @@ fetch sfackler/rust-postgres      rust-postgres      "MIT OR Apache-2.0"
 fetch jackc/pgx                   go-pgx             "MIT"
 fetch MagicStack/asyncpg          asyncpg            "Apache-2.0"
 fetch vapor/postgres-nio          swift-postgres-nio "MIT"
+echo
+echo "Fetching SQLite client references into references/"
+fetch rusqlite/rusqlite         rusqlite           "MIT"
+fetch groue/GRDB.swift           grdb               "MIT"
 echo
 echo "Done. See references/README.md for what each is good for."

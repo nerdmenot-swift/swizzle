@@ -148,3 +148,71 @@ runner and a code generator. These are its features that are not ours, and why:
 The `SQLITE_OPEN_READONLY` reader pool covers what `stmt_readonly` would have
 been used for, and more strongly: the connection cannot write at all rather than
 the statement being checked.
+
+## Cancellation, which the first pass never looked at
+
+The audit above covers statement compilation, text encoding, the error taxonomy and
+transactions. It does not mention `sqlite3_interrupt`, progress handlers, or timeouts —
+not in the findings and not in the out-of-scope table. That omission cost six CI rounds:
+a query timeout that reported on time and did not stop the statement, chased through the
+driver four times before the cause turned out to be a toolchain difference.
+
+So this is the pass that was missing, against **rusqlite** (the closest analogue — a typed
+wrapper over the same C API) and **GRDB** (the Swift one, and therefore the one whose
+absence a Swift user actually notices).
+
+### Where the three agree
+
+| | Swizzle | rusqlite | GRDB |
+|---|---|---|---|
+| check for cancellation *before* stepping | `cancelled.isSet` guard | — | `checkCancellation()` |
+| `sqlite3_interrupt` on cancellation | yes | `InterruptHandle` | yes |
+| interrupt lock **not** held across the query | yes | yes, deliberately | yes |
+
+That third row is worth dwelling on, because rusqlite documents the trap in the code:
+
+> It's unsafe to call `sqlite3_close` while another thread is performing a
+> `sqlite3_interrupt`, and vice versa, so we take this mutex during those functions. This
+> protects a copy of the `db` pointer … however the main copy, `db`, is unprotected.
+> **Otherwise, a long-running query would prevent calling interrupt, as interrupt would
+> only acquire the lock after the query's completion.**
+
+Which is precisely the failure this driver spent a week not having. `interruptLock` is
+held in `close()` and `interrupt()` and nowhere else — correct, and now correct on
+purpose rather than by luck.
+
+### Where we are ahead
+
+**Neither reference uses a progress handler for cancellation.** Both rely on the
+pre-flight check plus `sqlite3_interrupt`, and that combination has a documented hole:
+the interrupt does nothing if no statement is running, and does not apply to one begun
+afterwards. So a cancellation landing between `prepare` and the first `step` is spent on
+nothing.
+
+`sqlite3_progress_handler` is polled by the statement itself every 2000 VDBE
+instructions, so there is no window to miss. Swizzle installs one and reads the same flag
+the interrupt path sets, which makes the bound a guarantee rather than best-effort. GRDB
+would exhibit the same latency under the same conditions.
+
+### Where they are ahead
+
+**A public way to interrupt.** GRDB exposes `interrupt()` on `Database`, `DatabaseQueue`,
+`DatabasePool` and `DatabaseReader`; rusqlite hands out an `InterruptHandle` that is
+`Send + Sync` precisely so another thread can stop a running query. Swizzle's `interrupt()`
+is internal — reachable only through task cancellation. That covers most Swift code, and
+does not cover a pool aborting in-flight work at shutdown, or a UI cancel button holding a
+connection rather than a `Task`.
+
+**A way to opt out of it.** GRDB carries `interruptsWhenCancelled` on its suspension state
+and an `ignoringCancellation { }` scope, which it uses for its own transaction-observer
+callbacks. Swizzle always interrupts. That is the right default and the wrong absolute: a
+cleanup write inside a cancelled task is exactly the statement you want to finish, and
+today there is no way to say so.
+
+### A deliberate divergence
+
+GRDB's `busyMode` defaults to `.immediateError` — contention fails straight away — with
+`.timeout` and `.callback` as opt-ins. Swizzle waits five seconds by default, configurable
+per connection. Ours is the friendlier default for the common case and the less flexible
+surface; GRDB's is the safer one for an app that must never block its main thread. Neither
+is wrong, and the difference should be a choice rather than a discovery.

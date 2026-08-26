@@ -35,7 +35,11 @@ struct MySQLReadTimeoutTests {
         var configuration = MySQLConnectionConfiguration(
             address: .hostname("127.0.0.1", port: port), username: "u", tls: .disable)
         configuration.connectTimeout = .milliseconds(500)
-        configuration.readTimeout = .milliseconds(300)
+        // Two seconds, not 300ms. The idle period below still has to exceed the
+        // timeout for this to prove anything — but the *queries* need headroom too,
+        // and on a two-core runner a plain round trip can take longer than 300ms.
+        // Choosing a bound that a live connection cannot meet tests the runner.
+        configuration.readTimeout = .seconds(2)
 
         let started = ContinuousClock().now
         await #expect(throws: (any Error).self) {
@@ -100,14 +104,16 @@ struct MySQLReadTimeoutTests {
             username: user.name, password: user.password,
             database: TestServers.database, tls: .disable,
             serverPublicKey: .requestFromServer)
-        configuration.readTimeout = .milliseconds(200)
+        // Same reasoning as the Postgres suite: the idle window must outlast the
+        // timeout, and a live query must comfortably beat it.
+        configuration.readTimeout = .seconds(2)
 
         let connection = try await MySQLConnection.connect(
             configuration: configuration, on: TestServers.group.next())
         defer { connection.closeImmediately() }
 
         // Well past the timeout with no command outstanding.
-        try await Task.sleep(for: .milliseconds(700))
+        try await Task.sleep(for: .seconds(5))
         #expect(connection.isActive, "an idle connection was closed by the read timeout")
         #expect(try await connection.query("SELECT 1").rows[0][0].int == 1)
     }
