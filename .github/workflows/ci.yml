@@ -155,6 +155,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The only unpinned toolchain in the matrix, and it cost five rounds of
+      # chasing a driver bug that was not there.
+      #
+      # Every Linux job pins `container: swift:6.3.3`. This one took whatever the
+      # runner image shipped, which was Xcode 16.4 — Swift 6.1, two minor versions
+      # behind what the project is developed and tested against. A timeout test
+      # failed here and nowhere else, 37 local runs could not reproduce it even
+      # with the CPU fully saturated, and the instrumented message eventually
+      # showed the statement *was* aborted, just fifty seconds late: cancellation
+      # arriving late, not an abort that failed.
+      #
+      # Selecting the newest Xcode on the image narrows that gap, and printing the
+      # version means the next surprise names its own toolchain instead of taking
+      # a week to notice one was different.
+      - name: Use the newest toolchain on the image
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          swift --version
+
       - name: Build
         run: swift build --build-tests
 

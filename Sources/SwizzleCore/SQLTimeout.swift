@@ -59,17 +59,19 @@ public func withQueryTimeout<T: Sendable>(
             throw SQLTimeoutError(duration: duration, sql: sql)
         }
 
-        // Belt and braces, not the fix — worth saying because it looked like the
-        // fix for a while. The cancel used to sit *after* `try await group.next()`,
-        // where a rethrow skips it, and that seemed to explain a timeout that
-        // reported without stopping anything. It does not: Swift cancels a task
-        // group's remaining children when the body throws, so the old placement was
-        // redundant rather than wrong. Verified by putting it back and watching the
-        // cancellation tests still pass.
+        // `defer`, so the cancel happens on every exit including the throwing one.
         //
-        // Kept in `defer` anyway because relying on that implicit cancellation to
-        // be the only cancellation is a bet on a detail of the concurrency library
-        // that the next reader has no reason to know.
+        // It used to sit *after* `try await group.next()`, where a rethrow skips
+        // it. Putting it back and rerunning the cancellation tests shows no
+        // difference — but only on Swift 6.3.3, because a task group cancels its
+        // remaining children when the body throws. Whether older toolchains do the
+        // same was never checked, and CI was quietly running Swift 6.1 while that
+        // conclusion was drawn.
+        //
+        // So this is deliberate rather than redundant: relying on implicit
+        // cancellation means relying on a concurrency-library detail that has no
+        // reason to be stable across versions, and the cost of being explicit is
+        // one line.
         defer { group.cancelAll() }
 
         guard let result = try await group.next() else {
