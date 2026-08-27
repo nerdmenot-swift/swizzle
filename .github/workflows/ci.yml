@@ -216,6 +216,62 @@ jobs:
         run: swift build --swift-sdk ${{ matrix.arch }}-swift-linux-musl
 
 
+
+  # The integration suites on the one platform whose branches differ.
+  #
+  # `linux-integration` covers the protocol work on x86_64 Linux, and the macOS
+  # job skips every integration suite for want of fixtures — so the Darwin halves
+  # of the `#if canImport(Darwin)` branches compile in CI and have never run
+  # against a real server. `TCPKeepalive.swift` is the clearest case: it reaches
+  # for different socket option constants there, and nothing but a live
+  # connection exercises them.
+  #
+  # A separate job rather than more steps on `macos`, deliberately. That job
+  # already carries an isolation step for timing tests that were starved by
+  # contention on a three-core runner, and adding seven database servers
+  # alongside them would reintroduce exactly the noise it was built to measure.
+  macos-integration:
+    name: macOS integration (real servers)
+    runs-on: macos-15
+    # Dominated by downloading seven database distributions on a cold cache.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the newest toolchain on the image
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          swift --version
+
+      # The distributions, not the data directories: seeded state has to be built
+      # fresh or a schema change would be masked by a stale fixture.
+      - name: Cache database distributions
+        uses: actions/cache@v4
+        with:
+          path: .testservers/dist-darwin-arm64
+          key: testservers-dist-macos-arm64-${{ hashFiles('testservers/servers.conf') }}
+
+      - name: Start the fixtures
+        run: ./Scripts/test-servers.sh up
+
+      - name: Fixture capabilities
+        run: |
+          for d in .testservers/data-*/*; do
+            [ -d "$d" ] || continue
+            echo "$(basename "$d"): $(cat "$d/.plugins" 2>/dev/null | tr '\n' ' ')"
+          done
+
+      - name: Test
+        run: swift test
+
+      # Runs even when the suite fails: the server logs are usually the only
+      # record of why, and a failed job that discards them costs another whole
+      # cycle to reproduce.
+      - name: Server logs
+        if: always()
+        run: tail -n 50 .testservers/run-darwin-*/*.log || true
+
   # The platform the manifest claims and nothing had ever compiled.
   #
   # `Package.swift` declares `.iOS(.v17)`, which means SwiftPM will happily let

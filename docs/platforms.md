@@ -5,11 +5,12 @@ and the command is given so it can be re-checked.
 
 | target | status | verified by |
 |---|---|---|
-| macOS (arm64) | ✅ builds, 1375 tests pass | `swift test` (with `./Scripts/test-servers.sh up`) |
+| macOS (arm64) | ✅ builds, 1440 tests pass | `swift test` (with `./Scripts/test-servers.sh up`) |
 | Linux glibc (Swift 6.3.3) | ✅ builds, 784 run + 591 skipped, 0 failures | `docker run --rm -v "$PWD":/src -w /src swift:6.3.3 swift test --scratch-path .build-linux` |
+| Linux glibc (Swift 6.0.3) | ✅ builds, 1440 tests pass | `docker run --rm -v "$PWD":/src:ro swift:6.0.3 …` — the floor `swift-tools-version` claims |
 | Linux static musl, aarch64 | ✅ library builds | `swift build --swift-sdk aarch64-swift-linux-musl` |
 | Linux static musl, x86_64 | ✅ library builds | `swift build --swift-sdk x86_64-swift-linux-musl` |
-| iOS | ⬜ untested | declared in `Package.swift`, never built |
+| iOS (arm64, v17) | ✅ library targets build | `swift build --target … -Xswiftc -sdk -Xswiftc "$(xcrun --sdk iphoneos --show-sdk-path)" …`, in CI |
 | Windows | ⬜ untested | — |
 
 ## System dependencies
@@ -245,28 +246,49 @@ The static SDK is installed with a **pinned checksum**. `--checksum` is optional
 and the install works without it, which would mean a 300 MB unverified download
 on every run.
 
-Verified to build on Swift 6.1 as well as 6.3.3 — but building was never the
+Verified to build on Swift 6.0.3, 6.1 and 6.3.3 — but building was never the
 question. A query timeout reported on time and failed to bound the statement on
 6.1 and nowhere else, for fifty seconds against a fifty-millisecond deadline, and
 it took six CI rounds to find because the only job that could see it was the only
 job nobody had pinned.
 
-So the matrix now runs both ends: `minimum-toolchain` on `swift:6.1`, which is the
-oldest image published for this platform and stands in for the
-`swift-tools-version: 6.0` the package claims, and the macOS job on the newest
-Xcode the runner image carries. Pinning only the newest would have removed the
-coverage that found the bug — which is exactly what the first attempt at this did.
+So the matrix now runs both ends: `minimum-toolchain` on `swift:6.0.3`, and the
+macOS job on the newest Xcode the runner image carries. Pinning only the newest
+would have removed the coverage that found the bug — which is exactly what the
+first attempt at this did.
+
+That floor was itself wrong for a while, and worth recording. The job pinned
+`swift:6.1` on the belief that it was the oldest image published for this
+platform; `swift:6.0.3` exists, so the version the package actually advertises
+was the one version nothing ever compiled. It did not hold when finally tried:
+
+  - Ten `EventLoopFuture.wait()` calls sat inside `async` test functions. 6.0
+    rejects them and later toolchains do not — and it is right to. `wait()`
+    blocks the calling thread, which inside an `async` function belongs to the
+    cooperative pool, and the suite runs its tests in parallel.
+  - `#require(x.first?[1].string)` takes the macro's property-access path, and
+    the macro shipped with 6.0 cannot expand it through an optional subscript.
+
+Both were fixed rather than floored away.
 
 ### What CI does not cover
 
-The integration suites — anything needing MySQL, MariaDB or Postgres. They skip,
-because `./Scripts/test-servers.sh` starts native binaries bound to the host's
-loopback and CI has no equivalent. That is ~590 of 1375 tests, and it means **the
-protocol work is only ever verified on a developer machine**.
+**The integration suites on macOS.** `linux-integration` runs all seven fixtures
+on x86_64 Linux and the suite three times over, so the protocol work is no longer
+verified only on a developer machine — but the macOS job still skips every
+integration suite, and macOS is the one platform where the drivers compile a
+different set of branches. `TCPKeepalive.swift` reaches for different socket
+option constants under `#if canImport(Darwin)`, and those are only exercised
+against a real connection. Closing this means starting the fixtures on the macOS
+runner, which the script already supports.
 
-Stated plainly rather than left implicit: it is the largest remaining hole in the
-verification story, and closing it means running the fixtures inside the CI
-network namespace.
+**Anything not arm64 or x86_64**, and anything not macOS or Linux. Windows is
+untested and unclaimed. iOS is compiled but never run — there is no simulator
+step, so the claim is "it builds", not "it works".
+
+**MariaDB 10.11 and Postgres other than 16.** The fixture matrix now covers
+MariaDB 11.4/11.8/12.2, MySQL 8.0/8.4/9.1 and Postgres 16. The index publishes
+Postgres 14 through 18, so widening that is cheap and has not been done.
 
 ## Integration tests on Linux
 
