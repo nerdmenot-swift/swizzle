@@ -38,8 +38,8 @@ DIST="$ROOT/dist-$PLATFORM_TAG"
 DATA="$ROOT/data-$PLATFORM_TAG"
 RUN="$ROOT/run-$PLATFORM_TAG"
 CONF="testservers/servers.conf"
-INDEX_URL="https://github.com/doze-dev/doze-binaries/releases/download/mariadb/index.yaml"
-INDEX="$DIST/index.yaml"
+INDEX_BASE="https://github.com/doze-dev/doze-binaries/releases/download"
+index_file() { echo "$DIST/index-$1.yaml"; }
 
 mkdir -p "$DIST" "$DATA" "$RUN"
 
@@ -68,8 +68,14 @@ platform() {
   esac
 }
 
+# Both engines are published the same way — one `index.yaml` per release tag,
+# with identical structure — so this is parameterised rather than duplicated.
+# The MariaDB and Postgres paths in this script have drifted apart before, each
+# time because the same job was written twice.
 fetch_index() {
-  [[ -f "$INDEX" ]] && return 0
+  local engine="$1" idx
+  idx="$(index_file "$engine")"
+  [[ -f "$idx" ]] && return 0
   # **stderr, like every other progress message here.**
   #
   # `ensure_binaries` returns the base directory by echoing it, and the caller
@@ -84,23 +90,52 @@ fetch_index() {
   # the script before, because the index is then cached and this branch never
   # fires: it breaks the *first* run only, which is every new contributor and
   # every CI run.
-  echo "Fetching binary index…" >&2
-  curl -sSL --max-time 120 "$INDEX_URL" -o "$INDEX" || {
-    echo "could not download $INDEX_URL" >&2; exit 1
+  echo "Fetching $engine binary index…" >&2
+  curl -sSL --max-time 120 "$INDEX_BASE/$engine/index.yaml" -o "$idx" || {
+    echo "could not download $INDEX_BASE/$engine/index.yaml" >&2; exit 1
   }
 }
 
 # Pulls url/sha256 for a version+platform out of the YAML index. The layout is
 # fixed and shallow, so a windowed grep is enough and avoids a YAML dependency.
 index_field() {
-  local version="$1" plat="$2" field="$3"
+  local engine="$1" version="$2" plat="$3" field="$4"
   awk -v ver="            $version:" -v plat="                $plat:" -v field="                    $field:" '
     $0 == ver { inver = 1; next }
     inver && /^            [0-9]/ { inver = 0 }
     inver && $0 == plat { inplat = 1; next }
     inplat && /^                [a-z0-9_-]+:/ { inplat = 0 }
     inplat && index($0, field) == 1 { sub(/^[^:]*: */, ""); print; exit }
-  ' "$INDEX"
+  ' "$(index_file "$engine")"
+}
+
+# url + sha256 for one engine/version/platform, refetching the index once on a
+# miss.
+#
+# A miss is far more likely to mean a stale cache than a missing build:
+# `fetch_index` returns early whenever the file exists, so the index is
+# downloaded once and then kept forever. Bumping to a release published after
+# that download fails with "no binary for mariadb 11.4.13 on
+# aarch64-apple-darwin" while the index on GitHub lists it — the lookup is
+# correct and the file it reads is three weeks old.
+#
+# Refetching on a miss rather than on every run: the common path stays offline
+# and free, and the one case that needs the network is the one that asks for
+# something the cache has never heard of.
+index_lookup() {
+  local engine="$1" version="$2" plat="$3" url sha
+  fetch_index "$engine"
+  url="$(index_field "$engine" "$version" "$plat" url)"
+  sha="$(index_field "$engine" "$version" "$plat" sha256)"
+  if [[ -z "$url" ]]; then
+    echo "  $engine $version not in the cached index — refetching" >&2
+    rm -f "$(index_file "$engine")"
+    fetch_index "$engine"
+    url="$(index_field "$engine" "$version" "$plat" url)"
+    sha="$(index_field "$engine" "$version" "$plat" sha256)"
+  fi
+  [[ -n "$url" ]] || return 1
+  printf '%s\t%s\n' "$url" "$sha"
 }
 
 # MySQL tarballs come straight from dev.mysql.com. Unlike the MariaDB index
@@ -150,12 +185,6 @@ ensure_mysql_binaries() {
   echo "$base"
 }
 
-# Postgres binaries come from zonky's embedded-postgres jars on Maven Central.
-#
-# Not the doze-dev index, which is MariaDB only, and not Homebrew, which would
-# make the fixture depend on what the developer happens to have installed. Maven
-# Central is a stable unauthenticated URL with builds for every platform we care
-# about, and the jar is just a zip holding a .txz.
 # Postgres refuses to run as root outright — `initdb: cannot be run as root`,
 # with no `--user` escape of the kind MySQL and MariaDB accept. A CI container is
 # root, so everything Postgres runs through this.
@@ -182,42 +211,52 @@ pg_as_user() {
   fi
 }
 
-postgres_platform() {
-  local arch; arch="$(uname -m)"
-  case "$(uname -s)" in
-    Darwin) [[ "$arch" == "arm64" ]] && echo "darwin-arm64v8" || echo "darwin-amd64" ;;
-    Linux)  [[ "$arch" == "aarch64" ]] && echo "linux-arm64v8" || echo "linux-amd64" ;;
-    *) echo "unsupported platform: $(uname -s)" >&2; return 1 ;;
-  esac
-}
-
+# Postgres binaries come from the same doze-dev index as MariaDB.
+#
+# They used to come from zonky's embedded-postgres jars on Maven Central,
+# because the index was MariaDB-only. It is not any more, and the swap is a
+# straight upgrade: the index publishes a **sha256 for every artefact** and the
+# jar path verified nothing at all, so a 30 MB unauthenticated download over the
+# fixture's trust boundary is gone. It also collapses two unpack paths — jar,
+# unzip, find the inner `.txz`, untar — into the one MariaDB already uses, and
+# the tarballs are per-triple rather than per-jar-classifier, so there is no
+# second platform vocabulary (`arm64v8` vs `arm_64`) to keep straight.
 ensure_postgres_binaries() {
   local version="$1"
   local base="$DIST/postgres-$version"
   [[ -x "$base/bin/postgres" ]] && { echo "$base"; return 0; }
 
-  local platform; platform="$(postgres_platform)" || return 1
-  local url="https://repo1.maven.org/maven2/io/zonky/test/postgres"
-  url="$url/embedded-postgres-binaries-$platform/$version"
-  url="$url/embedded-postgres-binaries-$platform-$version.jar"
+  local plat url sha
+  plat="$(platform)"
+  IFS=$'\t' read -r url sha < <(index_lookup postgres "$version" "$plat") || true
+  if [[ -z "${url:-}" ]]; then
+    echo "no binary for postgres $version on $plat" >&2; return 1
+  fi
 
-  echo "  downloading postgres $version ($platform)" >&2
-  local jar="$DIST/postgres-$version.jar"
-  curl -sSL --max-time 600 -o "$jar" "$url" || {
+  local archive="$DIST/postgres-$version.tar.gz"
+  echo "  downloading postgres $version ($plat)…" >&2
+  curl -sSL --max-time 600 "$url" -o "$archive" || {
     echo "could not download $url" >&2; return 1
   }
 
-  mkdir -p "$base"
-  local staging="$DIST/.pg-$version"
-  rm -rf "$staging"; mkdir -p "$staging"
-  unzip -q -o "$jar" -d "$staging" || { echo "could not unpack $jar" >&2; return 1; }
+  if [[ -n "$sha" ]]; then
+    local actual
+    actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+    if [[ "$actual" != "$sha" ]]; then
+      echo "  checksum mismatch for postgres $version" >&2
+      echo "    expected $sha" >&2
+      echo "    actual   $actual" >&2
+      rm -f "$archive"
+      return 1
+    fi
+  fi
 
-  # One .txz inside, whose name encodes the platform differently from the jar's
-  # (arm64v8 vs arm_64), so it is found rather than constructed.
-  local archive; archive="$(find "$staging" -name 'postgres-*.txz' | head -1)"
-  [[ -n "$archive" ]] || { echo "no postgres archive inside $jar" >&2; return 1; }
-  tar -xJf "$archive" -C "$base" || { echo "could not extract $archive" >&2; return 1; }
-  rm -rf "$staging" "$jar"
+  local tmp="$DIST/.unpack-pg-$version"
+  rm -rf "$tmp"; mkdir -p "$tmp"
+  tar xzf "$archive" -C "$tmp" || { echo "could not extract $archive" >&2; return 1; }
+  # A single top-level directory, as with MariaDB; normalise its name.
+  mv "$tmp"/*/ "$base"
+  rm -rf "$tmp" "$archive"
 
   [[ -x "$base/bin/postgres" ]] || { echo "postgres missing from $base" >&2; return 1; }
   echo "$base"
@@ -228,32 +267,10 @@ ensure_binaries() {
   local base="$DIST/mariadb-$version"
   [[ -x "$base/bin/mariadbd" ]] && { echo "$base"; return 0; }
 
-  fetch_index
   local plat url sha
   plat="$(platform)"
-  url="$(index_field "$version" "$plat" url)"
-  sha="$(index_field "$version" "$plat" sha256)"
-
-  # A miss is far more likely to mean a stale cache than a missing build.
-  #
-  # `fetch_index` returns early whenever the file exists, so the index is
-  # downloaded once and then kept forever. Bumping to a release published after
-  # that download fails with "no binary for mariadb 11.4.13 on
-  # aarch64-apple-darwin" while the index on GitHub lists it — the lookup is
-  # correct and the file it reads is three weeks old.
-  #
-  # Refetching on a miss rather than on every run: the common path stays offline
-  # and free, and the one case that needs the network is the one that asks for
-  # something the cache has never heard of.
-  if [[ -z "$url" ]]; then
-    echo "  $version not in the cached index — refetching" >&2
-    rm -f "$INDEX"
-    fetch_index
-    url="$(index_field "$version" "$plat" url)"
-    sha="$(index_field "$version" "$plat" sha256)"
-  fi
-
-  if [[ -z "$url" ]]; then
+  IFS=$'\t' read -r url sha < <(index_lookup mariadb "$version" "$plat") || true
+  if [[ -z "${url:-}" ]]; then
     echo "no binary for mariadb $version on $plat" >&2; exit 1
   fi
 
@@ -704,12 +721,54 @@ HBA
   return 0
 }
 
+# Stops the postmaster, and reports whether it actually stopped.
+#
+# Two things were wrong here, and they compounded.
+#
+# `pg_ctl` was located under the *configured* version — `$DIST/postgres-$version`
+# — so changing the pin in `servers.conf` pointed the lookup at a directory that
+# does not exist yet while the old postmaster is still running. The guard was
+# `[[ -x pg_ctl && -d data ]] || return 0`, so it returned success without
+# stopping anything. Bumping 16.4.0 to 16.15.0 was enough to trigger it.
+#
+# And `stop_server` printed "stopped" unconditionally, so `down` said the right
+# thing while a server was still listening on 5432. That is the dangerous half:
+# `reset` and `clean` `rm -rf` the data directory straight after this returns,
+# and doing that under a live postmaster is how a data directory gets destroyed
+# beneath a running server.
+#
+# So the running server's own `postmaster.pid` is the source of truth — it is
+# written by whichever binary is actually running, and needs no version at all.
+# `pg_ctl` is still preferred when it is present, because it owns the shutdown
+# handshake; it is now verified rather than trusted, with a signal fallback.
 stop_postgres_server() {
   local name="$1" version="$2"
   local base="$DIST/postgres-$version"
   local data="$DATA/$name"
-  [[ -x "$base/bin/pg_ctl" && -d "$data" ]] || return 0
-  pg_as_user "$base/bin/pg_ctl" -D "$data" -m fast stop >/dev/null 2>&1 || true
+  [[ -d "$data" ]] || return 0
+
+  local pidfile="$data/postmaster.pid" pid=""
+  [[ -f "$pidfile" ]] && pid="$(head -1 "$pidfile" 2>/dev/null)"
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  if [[ -x "$base/bin/pg_ctl" ]]; then
+    pg_as_user "$base/bin/pg_ctl" -D "$data" -m fast stop >/dev/null 2>&1 || true
+  fi
+
+  local deadline=$((SECONDS + 30))
+  while kill -0 "$pid" 2>/dev/null && [[ $SECONDS -lt $deadline ]]; do sleep 0.3; done
+
+  # SIGINT is Postgres's own fast-shutdown signal, which is what `-m fast` sends.
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -INT "$pid" 2>/dev/null
+    deadline=$((SECONDS + 15))
+    while kill -0 "$pid" 2>/dev/null && [[ $SECONDS -lt $deadline ]]; do sleep 0.3; done
+  fi
+
+  kill -0 "$pid" 2>/dev/null && return 1
+  return 0
 }
 
 stop_server() {
@@ -718,11 +777,17 @@ stop_server() {
   # Postgres is stopped by pg_ctl rather than by signalling a pidfile we wrote,
   # because pg_ctl owns the postmaster's shutdown handshake.
   if [[ "$flavor" == "postgres" ]]; then
-    stop_postgres_server "$name" "$version"
-    # Reported like the others. While Postgres was silently not being stopped,
-    # `down` printed five lines for six servers and nobody counted.
-    echo "  $name stopped"
-    return 0
+    # Reported from the result, not announced regardless. While Postgres was
+    # silently not being stopped, `down` printed five lines for six servers and
+    # nobody counted; then the count was fixed and the *claim* still was not, so
+    # `down` reported "postgres16 stopped" with the postmaster still listening.
+    # `reset` and `clean` delete the data directory on the strength of this.
+    if stop_postgres_server "$name" "$version"; then
+      echo "  $name stopped"
+      return 0
+    fi
+    echo "  $name did NOT stop — a postmaster is still running on :$port" >&2
+    return 1
   fi
 
   local pidfile="$RUN/$name.pid"

@@ -72,7 +72,7 @@ jobs:
       - name: Install fixture dependencies
         run: |
           apt-get update -qq
-          apt-get install -y -qq curl libaio1t64 libncurses6 libnuma1 unzip xz-utils
+          apt-get install -y -qq curl libaio1t64 libncurses6 libnuma1 xz-utils
           ARCH=$(uname -m)
           ln -sf /usr/lib/$ARCH-linux-gnu/libaio.so.1t64 /usr/lib/$ARCH-linux-gnu/libaio.so.1
 
