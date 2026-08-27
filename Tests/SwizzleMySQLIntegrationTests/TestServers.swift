@@ -165,6 +165,20 @@ public enum TestServers {
         ]
     )
 
+    /// MySQL 8.0. The version most deployments are actually on, and the last
+    /// where `mysql_native_password` is the plugin you meet without the server
+    /// having been asked for it — 8.4 needs a flag, 9.0 removed it. Everything
+    /// else here tested a MySQL that most users have not upgraded to yet.
+    public static let mysql80 = MySQLTestServer(
+        name: "mysql80", port: 3311, flavor: .mysql, expectedVersionPrefix: "8.0",
+        users: [
+            .init(name: "native", password: "nativepass", plugin: "mysql_native_password"),
+            .init(name: "nopass", password: "", plugin: "mysql_native_password"),
+            .init(name: "caching", password: "cachingpass", plugin: "caching_sha2_password"),
+            .init(name: "sha256", password: "sha256pass", plugin: "sha256_password"),
+        ]
+    )
+
     /// MySQL 8.4 LTS. The only fixture with `mysql_native_password`, which 9.0
     /// removed, and the one that makes `caching_sha2_password` full auth and
     /// `sha256_password` verifiable at all.
@@ -189,7 +203,7 @@ public enum TestServers {
         ]
     )
 
-    public static let all = [mariadb114, mariadb118, mariadb122, mysql84, mysql91]
+    public static let all = [mariadb114, mariadb118, mariadb122, mysql80, mysql84, mysql91]
 
     /// The MariaDB-only fixtures, for features MySQL does not have —
     /// `client_ed25519`, `parsec`, `COM_STMT_BULK_EXECUTE`, `log_bin_compress`.
@@ -198,7 +212,7 @@ public enum TestServers {
     /// The MySQL-only fixtures, for features MariaDB does not have —
     /// `caching_sha2_password`, `sha256_password`, zstd, MySQL-dialect GTIDs
     /// and `COM_BINLOG_DUMP_GTID`.
-    public static let mysql = [mysql84, mysql91]
+    public static let mysql = [mysql80, mysql84, mysql91]
 
     /// The newest MariaDB fixture — used where a test needs one server rather
     /// than the whole matrix.

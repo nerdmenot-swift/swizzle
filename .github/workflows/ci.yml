@@ -126,10 +126,20 @@ jobs:
   # 6.1 rather than 6.0 because that is the oldest image Swift publishes for this
   # platform; the tools version is the older promise and the gap is noted in
   # docs/platforms.md.
+  # `Package.swift` says `swift-tools-version: 6.0`, so 6.0 is the floor we
+  # advertise — and this job pinned 6.1 for months, which meant the advertised
+  # floor was the one version nothing compiled. It did not hold: 6.0.3 rejected
+  # ten `EventLoopFuture.wait()` calls inside `async` test functions that later
+  # toolchains let through, and its `#require` macro could not expand an optional
+  # chain running through a subscript.
+  #
+  # Both were fixed rather than floored away — the `wait()` calls were a genuine
+  # hazard (blocking a cooperative-pool thread while the suite runs in parallel),
+  # not a dialect difference.
   minimum-toolchain:
-    name: Oldest supported Swift (6.1)
+    name: Oldest supported Swift (6.0)
     runs-on: ubuntu-latest
-    container: swift:6.1
+    container: swift:6.0.3
     steps:
       - uses: actions/checkout@v4
 
@@ -187,6 +197,53 @@ jobs:
 
       - name: Build
         run: swift build --swift-sdk ${{ matrix.arch }}-swift-linux-musl
+
+
+  # The platform the manifest claims and nothing has ever compiled.
+  #
+  # `Package.swift` declares `.iOS(.v17)`, which means SwiftPM will happily let
+  # someone add Swizzle to an iOS app — and `docs/platforms.md` has said
+  # "declared in Package.swift, never built" the whole time. A claim with zero
+  # coverage is the kind that gets discovered by a user rather than by us.
+  #
+  # Build only: there is no way to run a test suite on a simulator from here, and
+  # compiling is what the claim is actually about.
+  #
+  # Products rather than the whole package, deliberately. The CLI is a command
+  # line tool and has no business on iOS, and the two products below are the
+  # realistic surface — the query builder, and SQLite, which is the database an
+  # iOS app actually embeds. If the MySQL and Postgres drivers also build, that is
+  # a bonus rather than the claim.
+  #
+  # If this goes red, the honest response is to narrow `platforms:` rather than to
+  # keep advertising it.
+  ios:
+    name: iOS (build only)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Which toolchain
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          swift --version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      # The SDK and target have to reach clang as well as swiftc, because three of
+      # the targets are C: the SQLite amalgamation, libsodium's ed25519 subset and
+      # the zlib shim.
+      - name: Build for iOS
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          for product in Swizzle SwizzleSQLiteEngine; do
+            echo "── $product"
+            swift build --product "$product" \
+              -Xswiftc -sdk -Xswiftc "$SDK" \
+              -Xswiftc -target -Xswiftc arm64-apple-ios17.0 \
+              -Xcc -isysroot -Xcc "$SDK" \
+              -Xcc -target -Xcc arm64-apple-ios17.0
+          done
 
   macos:
     name: macOS

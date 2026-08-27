@@ -164,7 +164,7 @@ struct CommandHandlerTests {
         #expect(readsAfterStart > 0)  // a statement is in flight, so reads are wanted
 
         try harness.receive([.rowDescription([column("id")])])
-        _ = try promise.futureResult.wait()
+        _ = try await promise.futureResult.get()
 
         // Deliver more than the buffer's target, without consuming any.
         let target = PostgresAdaptiveRowBuffer.defaultTarget
@@ -187,7 +187,7 @@ struct CommandHandlerTests {
         let promise = harness.channel.eventLoop.makePromise(of: PostgresRowSequence.self)
         harness.send(.stream(sql: "SELECT id FROM big", bindings: [], maxRows: 0, promise))
         try harness.receive([.rowDescription([column("id")])])
-        let sequence = try promise.futureResult.wait()
+        let sequence = try await promise.futureResult.get()
 
         let target = PostgresAdaptiveRowBuffer.defaultTarget
         try harness.receive((0..<(target + 1)).map { .dataRow([int8(Int64($0))]) })
@@ -221,7 +221,7 @@ struct CommandHandlerTests {
         harness.send(.stream(sql: "SELECT id FROM t", bindings: [], maxRows: 0, promise))
 
         try harness.receive([.rowDescription([column("id")])])
-        let sequence = try promise.futureResult.wait()
+        let sequence = try await promise.futureResult.get()
 
         try harness.receive([.dataRow([int8(7)]), .dataRow([int8(8)])])
         try harness.receive([.commandComplete(tag: "SELECT 2"), .readyForQuery(.idle)])
@@ -240,7 +240,7 @@ struct CommandHandlerTests {
         let promise = harness.channel.eventLoop.makePromise(of: PostgresRowSequence.self)
         harness.send(.stream(sql: "SELECT id FROM t", bindings: [], maxRows: 0, promise))
         try harness.receive([.rowDescription([column("id")])])
-        let sequence = try promise.futureResult.wait()
+        let sequence = try await promise.futureResult.get()
 
         // Everything in one read, ending the statement — the case where the last
         // rows are still pending when the statement completes.
@@ -288,7 +288,7 @@ struct CommandHandlerTests {
             .readyForQuery(.idle),
         ])
 
-        let sequence = try promise.futureResult.wait()
+        let sequence = try await promise.futureResult.get()
         #expect(try await sequence.collect().isEmpty)
     }
 
@@ -317,7 +317,7 @@ struct CommandHandlerTests {
         let promise = harness.channel.eventLoop.makePromise(of: PostgresRowSequence.self)
         harness.send(.stream(sql: "SELECT id FROM t", bindings: [], maxRows: 0, promise))
         try harness.receive([.rowDescription([column("id")])])
-        let sequence = try promise.futureResult.wait()
+        let sequence = try await promise.futureResult.get()
 
         try harness.receive([
             .dataRow([int8(1)]),

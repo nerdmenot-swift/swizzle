@@ -477,11 +477,19 @@ start_mysql_server() {
       }
   fi
 
-  # mysql_native_password is disabled by default in 8.4 and **removed outright
-  # in 9.0**, so the flag is version-gated: passing it to 9.x aborts startup
-  # with "unknown variable".
+  # mysql_native_password moves in every release, so the flag is version-gated
+  # in both directions:
+  #
+  #   8.0  enabled by default; the option does not exist, and passing it aborts
+  #        startup with "unknown variable" exactly as 9.x does
+  #   8.4  present but off; needs the flag
+  #   9.x  removed outright; the option is gone again
+  #
+  # The `8.0.*` arm has to come first — case arms match in order, and a bare
+  # `8.*` swallows 8.0 along with 8.4.
   local native_password_flag=()
   case "$version" in
+    8.0.*) ;;
     8.*) native_password_flag=(--mysql-native-password=ON) ;;
   esac
   # MySQL writes its auto-generated certificates to the data directory rather

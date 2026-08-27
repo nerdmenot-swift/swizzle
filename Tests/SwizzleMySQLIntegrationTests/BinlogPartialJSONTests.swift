@@ -204,6 +204,13 @@ struct BinlogPartialJSONTests {
         let update = try #require(Self.updates(events, table: table).first, "no update row event")
 
         #expect(update.jsonDiffs.isEmpty, "an ordinary update should carry no diffs")
-        #expect(try #require(update.updatedRows.first?[1].string).contains("grace"))
+        // Hoisted out of the `#require` rather than written as
+        // `#require(update.updatedRows.first?[1].string)`. The macro rewrites a
+        // trailing property access into `__checkPropertyAccess`, and the version
+        // bundled with Swift 6.0 cannot form that rewrite when the chain runs
+        // through an optional subscript — it drops the unwrap and fails to build.
+        // Later toolchains handle it, which is exactly why nothing noticed.
+        let updated = try #require(update.updatedRows.first, "no updated row")
+        #expect(try #require(updated[1].string).contains("grace"))
     }
 }

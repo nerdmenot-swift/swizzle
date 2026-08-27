@@ -77,7 +77,7 @@ struct NotificationTests {
         try harness.channel.writeInbound(PostgresBackendMessage.commandComplete(tag: "SELECT 2"))
         try harness.channel.writeInbound(PostgresBackendMessage.readyForQuery(.idle))
 
-        let result = try promise.futureResult.wait()
+        let result = try await promise.futureResult.get()
         #expect(result.rows.count == 2)
 
         var iterator = stream.makeAsyncIterator()

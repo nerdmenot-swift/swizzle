@@ -89,7 +89,7 @@ struct PostgresConnectTimeoutTests {
             .childChannelInitializer { _ in group.next().makeSucceededVoidFuture() }
             .bind(host: "127.0.0.1", port: 0)
             .get()
-        defer { try? silent.close().wait() }
+        defer { silent.close(promise: nil) }
         let port = try #require(silent.localAddress?.port)
 
         var configuration = PostgresConnectionConfiguration(
