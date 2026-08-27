@@ -251,6 +251,7 @@ public final class MySQLConnection: Sendable {
     /// still throws.
     public func close() async throws {
         guard channel.isActive else { return }
+        sessionState.recordClose("it was closed by the client with COM_QUIT")
         await sayGoodbye()
         do {
             try await channel.close()
@@ -343,7 +344,10 @@ public final class MySQLConnection: Sendable {
         // using a connection that is already known to be dead — into an
         // immediate, well-named error instead of a trip through the pipeline.
         guard channel.isActive else {
-            throw MySQLProtocolError.connectionClosed("the connection is closed")
+            throw MySQLProtocolError.connectionClosed(
+                sessionState.closeReason.map { "the connection is closed — \($0)" }
+                    ?? "the connection is closed"
+            )
         }
 
         let promise = channel.eventLoop.makePromise(of: MySQLCommandResponse.self)

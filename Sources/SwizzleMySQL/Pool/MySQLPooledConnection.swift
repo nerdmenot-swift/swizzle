@@ -28,7 +28,14 @@ extension MySQLConnection: PooledConnection {
     }
 
     /// Closes without waiting. Unambiguous spelling of the synchronous close.
+    ///
+    /// Records the cause before closing, because `channelInactive` cannot tell
+    /// the two apart: it fires whether the peer hung up or we did, and a
+    /// connection closed by its own owner should not be reported as the server
+    /// dropping it. ``MySQLSessionState/recordClose(_:)`` keeps the first cause
+    /// it is given, so this wins over the generic message that follows.
     public func closeImmediately() {
+        sessionState.recordClose("it was closed by the client")
         channel.close(promise: nil)
     }
 

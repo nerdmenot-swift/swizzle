@@ -44,24 +44,46 @@ struct ResultSetScalingTests {
         // flatter the ratios.
         _ = try await connection.query("SELECT * FROM \(table) LIMIT 1000")
 
-        func seconds(rows: Int) async throws -> Double {
-            // Best of three: this runs alongside other suites, and a single
-            // sample picks up whatever else the machine was doing.
-            var best = Double.greatestFiniteMagnitude
-            for _ in 0..<3 {
-                let start = DispatchTime.now().uptimeNanoseconds
-                let result = try await connection.query(
-                    "SELECT * FROM \(table) WHERE id < \(rows)"
-                )
-                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
-                #expect(result.rows.count == rows)
-                best = min(best, elapsed)
-            }
-            return best
+        // Interleaved, best-of-five, rather than five of one size then five of
+        // the other.
+        //
+        // The ratio is only meaningful if both sizes were measured under the
+        // same conditions, and measuring them in separate blocks does not
+        // guarantee that: this suite runs alongside every other, so the load
+        // during the first block is not the load during the second. A batch that
+        // happens to straddle another suite's startup inflates one side of a
+        // ratio that is supposed to be about algorithmic shape.
+        //
+        // Interleaving makes the two samples neighbours in time, so whatever the
+        // machine is doing, it is doing it to both. Best-of-N on top: contention
+        // can only ever *add* time, so the minimum is the closest estimate of the
+        // real cost, and the larger query needs more attempts than the smaller
+        // one to catch a clean window — it is four times the work, so four times
+        // the chance of being interrupted.
+        //
+        // Reproduced by running the whole suite under 2x CPU oversubscription,
+        // where the sequential form reported 8.66 against a bound of 8.0. The
+        // bound is not the problem and has not been touched: a genuinely
+        // quadratic decoder is a 16, and moving 8.0 upward to accommodate noise
+        // is how a test stops being able to fail for the reason it exists.
+        var smallBest = Double.greatestFiniteMagnitude
+        var largeBest = Double.greatestFiniteMagnitude
+
+        func sample(rows: Int) async throws -> Double {
+            let start = DispatchTime.now().uptimeNanoseconds
+            let result = try await connection.query("SELECT * FROM \(table) WHERE id < \(rows)")
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
+            #expect(result.rows.count == rows)
+            return elapsed
         }
 
-        let small = try await seconds(rows: 10_000)
-        let large = try await seconds(rows: 40_000)
+        for _ in 0..<5 {
+            smallBest = min(smallBest, try await sample(rows: 10_000))
+            largeBest = min(largeBest, try await sample(rows: 40_000))
+        }
+
+        let small = smallBest
+        let large = largeBest
 
         // Four times the rows. Linear predicts ~4x, quadratic ~16x. The bound is
         // deliberately loose — it is there to catch a return to quadratic, not

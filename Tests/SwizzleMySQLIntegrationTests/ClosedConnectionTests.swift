@@ -46,6 +46,67 @@ struct ClosedConnectionTests {
         }
     }
 
+    /// The error has to say *why*, not just that.
+    ///
+    /// `send` refuses to write to an inactive channel, and for a long time said
+    /// only "the connection is closed". That is true and it is the least useful
+    /// thing it could say: two binlog tests failed on a contended macOS runner
+    /// with exactly that message and it named neither what closed the connection
+    /// nor which side did it, so there was nothing to investigate from.
+    ///
+    /// These assert the message rather than the type. Every other test in this
+    /// file checks `MySQLProtocolError.self`, which passes just as happily when
+    /// the cause has been dropped on the floor — so without these the diagnosis
+    /// would rot the first time somebody refactored the close path.
+    @Test("a client-side close says the client closed it")
+    func closeReasonNamesTheClient() async throws {
+        let connection = try await Self.connect(TestServers.mariadb114)
+        connection.closeImmediately()
+
+        // Not `close()`: this is the abrupt path, and it must not claim the peer
+        // hung up when the caller did.
+        await #expect { try await connection.ping() } throws: { error in
+            let text = "\(error)"
+            return text.contains("closed by the client") && !text.contains("peer")
+        }
+    }
+
+    /// The other side of it, and the one that matters when diagnosing a real
+    /// failure: the server went away without being asked.
+    ///
+    /// `KILL` from a second connection is a genuine server-initiated close, so
+    /// this exercises `channelInactive` rather than the local path — the two
+    /// were indistinguishable before, both arriving as "the connection is
+    /// closed".
+    @Test("a server-side kill says the peer closed it")
+    func closeReasonNamesThePeer() async throws {
+        let victim = try await Self.connect(TestServers.mariadb114)
+        defer { victim.closeImmediately() }
+        let killer = try await Self.connect(TestServers.mariadb114)
+        defer { killer.closeImmediately() }
+
+        _ = try await killer.query("KILL \(victim.metadata.connectionID)")
+
+        // The kill lands asynchronously; the connection is dead once the channel
+        // notices, which is what is being waited for rather than a fixed delay.
+        var text = ""
+        for _ in 0..<200 {
+            do {
+                _ = try await victim.query("SELECT 1")
+            } catch {
+                text = "\(error)"
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(
+            text.contains("peer") || text.contains("connection failed"),
+            "expected a peer-close diagnosis, got: \(text.isEmpty ? "no error at all" : text)"
+        )
+        #expect(!text.contains("closed by the client"))
+    }
+
     /// `closeImmediately` is the abrupt path — the one a pool takes when it
     /// decides a connection is not worth keeping — so it has to leave the
     /// connection in the same well-behaved state.

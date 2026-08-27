@@ -549,11 +549,25 @@ final class MySQLCommandHandler: ChannelDuplexHandler, @unchecked Sendable {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        fail(MySQLProtocolError.connectionClosed("connection closed mid-command"))
+        // Recorded *and* reported. `fail` reaches whatever command is in flight
+        // now; `send`'s guard catches the next caller. Both used to say only
+        // that the connection was closed, and neither said by whom — which is
+        // the whole diagnosis when a driver drops a connection under load.
+        //
+        // Order matters: `recordClose` keeps the first cause it is given, so a
+        // client-initiated close has already claimed it by the time this runs
+        // and the message below reads "closed by the client" rather than
+        // blaming the peer.
+        sessionState.recordClose("the peer closed the connection")
+        fail(MySQLProtocolError.connectionClosed(
+            "the connection closed while a command was in flight — "
+            + (sessionState.closeReason ?? "cause unknown")
+        ))
         context.fireChannelInactive()
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
+        sessionState.recordClose("the connection failed: \(error)")
         fail(error)
         context.fireErrorCaught(error)
     }
