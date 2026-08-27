@@ -87,6 +87,23 @@ jobs:
       - name: Start the fixtures
         run: ./Scripts/test-servers.sh up
 
+      # What the fixture actually built, printed rather than assumed.
+      #
+      # PARSEC availability is a property of the build, not of the version: the
+      # x86_64 Linux MariaDB tarballs used to ship the *client* plugin
+      # (`parsec.so`) without the server one (`auth_parsec.so`), so those suites
+      # skipped here and passed on macOS, and nothing said so out loud. The
+      # binaries now build every triple from source and carry `auth_parsec.so`.
+      #
+      # This is the line that says whether that holds. An empty `.plugins` on
+      # x86_64 means the parsec suites are silently not running.
+      - name: Fixture capabilities
+        run: |
+          for d in .testservers/data-*/*; do
+            [ -d "$d" ] || continue
+            echo "$(basename "$d"): $(cat "$d/.plugins" 2>/dev/null | tr '\n' ' ')"
+          done
+
       # **Three runs, not one.** Both bugs found on this platform today appeared
       # intermittently — the read timeout in two runs of four, the online-DDL
       # cutover in one of four — and each passed on macOS every time. A single
@@ -199,24 +216,23 @@ jobs:
         run: swift build --swift-sdk ${{ matrix.arch }}-swift-linux-musl
 
 
-  # The platform the manifest claims and nothing has ever compiled.
+  # The platform the manifest claims and nothing had ever compiled.
   #
   # `Package.swift` declares `.iOS(.v17)`, which means SwiftPM will happily let
-  # someone add Swizzle to an iOS app — and `docs/platforms.md` has said
-  # "declared in Package.swift, never built" the whole time. A claim with zero
-  # coverage is the kind that gets discovered by a user rather than by us.
+  # someone add Swizzle to an iOS app — and `docs/platforms.md` said "declared in
+  # Package.swift, never built" the whole time. The first run of this job found a
+  # genuine break on the very first C target it reached: the ed25519 shim included
+  # `<sys/random.h>`, which is in the macOS SDK and not in the iPhoneOS one.
   #
   # Build only: there is no way to run a test suite on a simulator from here, and
   # compiling is what the claim is actually about.
   #
-  # Products rather than the whole package, deliberately. The CLI is a command
-  # line tool and has no business on iOS, and the two products below are the
-  # realistic surface — the query builder, and SQLite, which is the database an
-  # iOS app actually embeds. If the MySQL and Postgres drivers also build, that is
-  # a bonus rather than the claim.
+  # Library targets rather than the whole package. The CLI is a command line tool
+  # and has no business on iOS; these four pull in everything under it — the
+  # builder, the migrator, both drivers, the pool and all three C targets.
   #
-  # If this goes red, the honest response is to narrow `platforms:` rather than to
-  # keep advertising it.
+  # If this goes red, the honest response is to fix it or to narrow `platforms:`,
+  # not to keep advertising it.
   ios:
     name: iOS (build only)
     runs-on: macos-15
@@ -230,20 +246,24 @@ jobs:
           swift --version
           xcrun --sdk iphoneos --show-sdk-path
 
-      # The SDK and target have to reach clang as well as swiftc, because three of
-      # the targets are C: the SQLite amalgamation, libsodium's ed25519 subset and
-      # the zlib shim.
+      # `--target`, not `--product`. `--product Swizzle` draws
+      # "cannot be used with the automatic product 'Swizzle'; building the
+      # default target instead" and quietly builds the whole package, which is
+      # not what the loop claimed to be doing.
+      #
+      # The SDK and target have to reach clang as well as swiftc, because three
+      # of the targets are C: the SQLite amalgamation, libsodium's ed25519
+      # subset and the zlib shim.
       - name: Build for iOS
         run: |
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
-          for product in Swizzle SwizzleSQLiteEngine; do
-            echo "── $product"
-            swift build --product "$product" \
-              -Xswiftc -sdk -Xswiftc "$SDK" \
-              -Xswiftc -target -Xswiftc arm64-apple-ios17.0 \
-              -Xcc -isysroot -Xcc "$SDK" \
-              -Xcc -target -Xcc arm64-apple-ios17.0
-          done
+          swift build \
+            --target SwizzleSQLiteEngine --target SwizzleMySQLEngine \
+            --target SwizzlePostgres --target SwizzleOnlineDDL \
+            -Xswiftc -sdk -Xswiftc "$SDK" \
+            -Xswiftc -target -Xswiftc arm64-apple-ios17.0 \
+            -Xcc -isysroot -Xcc "$SDK" \
+            -Xcc -target -Xcc arm64-apple-ios17.0
 
   macos:
     name: macOS

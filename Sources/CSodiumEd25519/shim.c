@@ -97,11 +97,19 @@ sodium_sub(unsigned char *a, const unsigned char *b, const size_t len)
  * link time, so it is implemented properly rather than stubbed: a stub that
  * returned predictable bytes would be a loaded gun if anything ever did call it.
  *
- * `getentropy` is the portable choice — macOS 10.12+, glibc 2.25+, musl 1.1.20+
- * — and is capped at 256 bytes per call, hence the loop.
+ * Apple platforms use `arc4random_buf` and everything else uses `getentropy`.
+ *
+ * The Apple half was `<sys/random.h>` + `getentropy`, which is right for macOS
+ * and does not build for iOS at all: that header is in the macOS SDK and not in
+ * the iPhoneOS one, so the first compile ever attempted against the iOS SDK
+ * stopped here. `Package.swift` had declared `.iOS(.v17)` the whole time.
+ *
+ * `arc4random_buf` is in `<stdlib.h>` on every Apple platform, is seeded from
+ * the kernel CSPRNG, has no 256-byte cap, and returns void because it cannot
+ * fail — so the loop and the `abort()` are needed only on the getentropy side.
  */
 #if defined(__APPLE__)
-# include <sys/random.h>
+# include <stdlib.h>
 #else
 # include <unistd.h>
 #endif
@@ -109,9 +117,13 @@ sodium_sub(unsigned char *a, const unsigned char *b, const size_t len)
 void
 randombytes_buf(void *const buf, const size_t size)
 {
+#if defined(__APPLE__)
+    arc4random_buf(buf, size);
+#else
     unsigned char *p = (unsigned char *) buf;
     size_t         remaining = size;
 
+    /* getentropy is capped at 256 bytes per call, hence the loop. */
     while (remaining > 0U) {
         size_t chunk = remaining > 256U ? 256U : remaining;
         if (getentropy(p, chunk) != 0) {
@@ -123,6 +135,7 @@ randombytes_buf(void *const buf, const size_t size)
         p += chunk;
         remaining -= chunk;
     }
+#endif
 }
 
 /* ------------------------------------------------------------------ *

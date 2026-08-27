@@ -233,6 +233,26 @@ ensure_binaries() {
   plat="$(platform)"
   url="$(index_field "$version" "$plat" url)"
   sha="$(index_field "$version" "$plat" sha256)"
+
+  # A miss is far more likely to mean a stale cache than a missing build.
+  #
+  # `fetch_index` returns early whenever the file exists, so the index is
+  # downloaded once and then kept forever. Bumping to a release published after
+  # that download fails with "no binary for mariadb 11.4.13 on
+  # aarch64-apple-darwin" while the index on GitHub lists it — the lookup is
+  # correct and the file it reads is three weeks old.
+  #
+  # Refetching on a miss rather than on every run: the common path stays offline
+  # and free, and the one case that needs the network is the one that asks for
+  # something the cache has never heard of.
+  if [[ -z "$url" ]]; then
+    echo "  $version not in the cached index — refetching" >&2
+    rm -f "$INDEX"
+    fetch_index
+    url="$(index_field "$version" "$plat" url)"
+    sha="$(index_field "$version" "$plat" sha256)"
+  fi
+
   if [[ -z "$url" ]]; then
     echo "no binary for mariadb $version on $plat" >&2; exit 1
   fi
