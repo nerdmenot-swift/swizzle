@@ -10,10 +10,11 @@ import Testing
 /// `Scripts/cli-comparison.sh` creates.
 @Suite("CLI comparison", .serialized,
        .enabled(if: TestServers.isAvailable
-                && ProcessInfo.processInfo.environment["SWIZZLE_BENCH"] != nil))
+                && ProcessInfo.processInfo.environment["SWIZZLE_BENCH"] != nil,
+                "Set SWIZZLE_BENCH=1 to run benchmarks"))
 struct CLIComparison {
     @Test func measure() async throws {
-        let server = TestServers.mariaDB.first { $0.name == "mariadb122" }!
+        let server = TestServers.mariaDB.first { $0.name == "mariadb123" }!
         let user = server.primaryUser
         let config = MySQLConnectionConfiguration(
             address: .hostname(TestServers.host, port: server.port),

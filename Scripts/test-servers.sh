@@ -430,10 +430,37 @@ start_server() {
     --server-id="$port" \
     --pid-file="$RUN/$name.pid" \
     > "$RUN/$name.log" 2>&1 &
+  # The pid of the server we just launched, so readiness can be about *this*
+  # process rather than about the port.
+  #
+  # Readiness was "can I connect to 127.0.0.1:$port", which anything listening
+  # satisfies — including a server this script started earlier and can no longer
+  # see. Renaming the 12.2 fixture to 12.3 orphaned the running 12.2 server (see
+  # the sweep in `stop_orphans`); the new one could not take the data directory,
+  # the probe connected to the old one and called it ready, and the seed then ran
+  # against it and failed with ERROR 1396 because those users already existed. A
+  # confusing error two steps from its cause — and the quiet version of it is a
+  # suite testing a server version nobody chose.
+  #
+  # Liveness alone is not enough, which the reproduction showed: the doomed
+  # server does not exit, it sits retrying the aria control file lock for thirty
+  # seconds, so `kill -0` passes for the whole window the probe is succeeding
+  # against the wrong server. The pid file is the identity check — mariadbd and
+  # mysqld each write *their own* pid to `--pid-file` once up, so requiring it to
+  # equal the pid we launched is exactly "the server answering is the one I
+  # started".
+  local launched=$!
 
   local deadline=$((SECONDS + 60))
   while [[ $SECONDS -lt $deadline ]]; do
-    if "$base/bin/mariadb" -h 127.0.0.1 -P "$port" -u root -e "SELECT 1" >/dev/null 2>&1; then
+    # A dead launch is a failed start, not a slow one.
+    if ! kill -0 "$launched" 2>/dev/null; then
+      echo "  $name: the server exited during startup" >&2
+      tail -5 "$RUN/$name.log" >&2
+      return 1
+    fi
+    if [[ "$(cat "$RUN/$name.pid" 2>/dev/null)" == "$launched" ]] \
+       && "$base/bin/mariadb" -h 127.0.0.1 -P "$port" -u root -e "SELECT 1" >/dev/null 2>&1; then
       # Tracked by its own marker rather than by "did we just initialise", and
       # the MySQL path below has carried this fix for a while: the two come apart
       # the first time a server initialises successfully and then fails to start.
@@ -556,10 +583,20 @@ start_mysql_server() {
     ${native_password_flag[@]+"${native_password_flag[@]}"} \
     --pid-file="$RUN/$name.pid" \
     > "$RUN/$name.log" 2>&1 &
+  # Same as the MariaDB path above: readiness must be about this process, not
+  # about whoever happens to hold the port.
+  local launched=$!
 
   local deadline=$((SECONDS + 90))
   while [[ $SECONDS -lt $deadline ]]; do
-    if "$base/bin/mysql" -h 127.0.0.1 -P "$port" -u root --skip-password \
+    # A dead launch is a failed start, not a slow one.
+    if ! kill -0 "$launched" 2>/dev/null; then
+      echo "  $name: the server exited during startup" >&2
+      tail -5 "$RUN/$name.log" >&2
+      return 1
+    fi
+    if [[ "$(cat "$RUN/$name.pid" 2>/dev/null)" == "$launched" ]] \
+       && "$base/bin/mysql" -h 127.0.0.1 -P "$port" -u root --skip-password \
          -e "SELECT 1" >/dev/null 2>&1; then
       if [[ ! -f "$datadir/.seeded" ]]; then
         "$base/bin/mysql" -h 127.0.0.1 -P "$port" -u root --skip-password \
@@ -771,6 +808,54 @@ stop_postgres_server() {
   return 0
 }
 
+# Stops servers this script started that `servers.conf` no longer names.
+#
+# `down`, `reset` and `clean` all drive `each_server`, which reads the conf — so
+# they can only stop what the conf currently lists. Rename a fixture (12.2.2 to
+# 12.3.3, say) or delete a line, and the running server becomes invisible to
+# every command here: `down` reports success, `up` finds the port occupied, and
+# the new server fails to bind while the probe cheerfully connects to the old
+# one. That is not hypothetical — it is how a 12.3.3 fixture came to be seeded
+# into a 12.2.2 server.
+#
+# So the conf says what *should* run, and the run and data directories say what
+# *does*. This reconciles the two.
+stop_orphans() {
+  local known=" "
+  known+="$(grep -vE '^\s*(#|$)' "$CONF" | awk '{print $1}' | tr '\n' ' ')"
+
+  local pf name pid
+  for pf in "$RUN"/*.pid; do
+    [[ -f "$pf" ]] || continue
+    name="$(basename "$pf" .pid)"
+    [[ "$known" == *" $name "* ]] && continue
+    pid="$(cat "$pf" 2>/dev/null)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "  $name is running but no longer in servers.conf — stopping it" >&2
+      kill "$pid" 2>/dev/null
+      local deadline=$((SECONDS + 30))
+      while kill -0 "$pid" 2>/dev/null && [[ $SECONDS -lt $deadline ]]; do sleep 0.3; done
+      kill -9 "$pid" 2>/dev/null
+    fi
+    rm -f "$pf"
+  done
+
+  local pgfile
+  for pgfile in "$DATA"/*/postmaster.pid; do
+    [[ -f "$pgfile" ]] || continue
+    name="$(basename "$(dirname "$pgfile")")"
+    [[ "$known" == *" $name "* ]] && continue
+    pid="$(head -1 "$pgfile" 2>/dev/null)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "  $name is running but no longer in servers.conf — stopping it" >&2
+      kill -INT "$pid" 2>/dev/null
+      local deadline=$((SECONDS + 30))
+      while kill -0 "$pid" 2>/dev/null && [[ $SECONDS -lt $deadline ]]; do sleep 0.3; done
+      kill -9 "$pid" 2>/dev/null
+    fi
+  done
+}
+
 stop_server() {
   local name="$1" version="${2:-}" port="${3:-}" seed="${4:-}" flavor="${5:-mariadb}"
 
@@ -832,9 +917,11 @@ case "${1:-up}" in
   # further. `each_server` passes all five fields.
   down)
     each_server stop_server
+    stop_orphans
     ;;
   reset)
     each_server stop_server
+    stop_orphans
     rm -rf "$DATA"
     mkdir -p "$DATA"
     echo "Data directories wiped; rebuilding…"
@@ -842,6 +929,7 @@ case "${1:-up}" in
     ;;
   clean)
     each_server stop_server
+    stop_orphans
     rm -rf "$ROOT"
     echo "Removed $ROOT (binaries and data)."
     ;;

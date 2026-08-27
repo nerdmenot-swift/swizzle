@@ -155,8 +155,8 @@ public enum TestServers {
         ]
     )
 
-    public static let mariadb122 = MySQLTestServer(
-        name: "mariadb122", port: 3308, flavor: .mariaDB, expectedVersionPrefix: "12.2",
+    public static let mariadb123 = MySQLTestServer(
+        name: "mariadb123", port: 3308, flavor: .mariaDB, expectedVersionPrefix: "12.3",
         users: [
             .init(name: "native", password: "nativepass", plugin: "mysql_native_password"),
             .init(name: "nopass", password: "", plugin: "mysql_native_password"),
@@ -203,11 +203,11 @@ public enum TestServers {
         ]
     )
 
-    public static let all = [mariadb114, mariadb118, mariadb122, mysql80, mysql84, mysql91]
+    public static let all = [mariadb114, mariadb118, mariadb123, mysql80, mysql84, mysql91]
 
     /// The MariaDB-only fixtures, for features MySQL does not have —
     /// `client_ed25519`, `parsec`, `COM_STMT_BULK_EXECUTE`, `log_bin_compress`.
-    public static let mariaDB = [mariadb114, mariadb118, mariadb122]
+    public static let mariaDB = [mariadb114, mariadb118, mariadb123]
 
     /// The MySQL-only fixtures, for features MariaDB does not have —
     /// `caching_sha2_password`, `sha256_password`, zstd, MySQL-dialect GTIDs
@@ -216,7 +216,7 @@ public enum TestServers {
 
     /// The newest MariaDB fixture — used where a test needs one server rather
     /// than the whole matrix.
-    public static let latest = mariadb122
+    public static let latest = mariadb123
 
     /// The newest MySQL fixture, for the same purpose.
     public static let latestMySQL = mysql91
@@ -224,17 +224,25 @@ public enum TestServers {
     /// Servers offering `parsec`, as the fixture actually built them.
     ///
     /// **Read from the fixture rather than declared from a version number**,
-    /// because availability is a property of the build. MariaDB 11.6+ supports
-    /// PARSEC, but the x86_64 Linux tarballs ship only the *client* plugin
-    /// (`parsec.so`) and not the server one (`auth_parsec.so`), so on that
-    /// platform it cannot be installed at all. A hardcoded list said 11.8 and
-    /// 12.2 had it, CI disagreed, and the disagreement surfaced as a seed that
-    /// aborted and left two servers with no users whatsoever.
+    /// because availability is a property of the build, not of the release.
+    /// MariaDB 11.6+ supports PARSEC, but for a long time the x86_64 Linux
+    /// tarballs shipped only the *client* plugin (`parsec.so`) and not the
+    /// server one (`auth_parsec.so`), so on that platform it could not be
+    /// installed at all. A hardcoded list said 11.8 and 12.2 had it, CI
+    /// disagreed, and the disagreement surfaced as a seed that aborted and left
+    /// two servers with no users whatsoever.
+    ///
+    /// The builds now carry `auth_parsec.so` on every triple — but the gating
+    /// stays, because the fix arrived one version at a time and that is visible
+    /// here: 11.8.9 has it and 12.2.2 does not, which is why the 12.x fixture
+    /// moved to 12.3.3. A version number would have claimed coverage that the
+    /// tarball did not have.
     ///
     /// `./Scripts/test-servers.sh` records what it managed to install in
-    /// `.plugins` beside each data directory. Empty here means the parsec suites
-    /// skip, which is the honest outcome on a build that cannot run them.
-    public static let withParsec: [MySQLTestServer] = [mariadb118, mariadb122]
+    /// `.plugins` beside each data directory, and both integration jobs print
+    /// it. Empty here means the parsec suites skip, which is the honest outcome
+    /// on a build that cannot run them.
+    public static let withParsec: [MySQLTestServer] = [mariadb118, mariadb123]
         .filter { hasPlugin("parsec", $0) }
 
     static func hasPlugin(_ plugin: String, _ server: MySQLTestServer) -> Bool {
