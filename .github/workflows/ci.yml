@@ -217,6 +217,40 @@ jobs:
       - name: Build
         run: swift build --build-tests
 
+      # Runs *before* the full suite, alone, and answers one question.
+      #
+      # Two timing tests failed the last run at 19.12s and 19.13s against a
+      # ten-second bound. Near-identical numbers from tests that execute in
+      # parallel points at a shared resource rather than at either being slow, and
+      # 19 seconds is not explicable as ordinary scheduler noise — the entire
+      # suite runs in 132 seconds on this runner.
+      #
+      # One of the two touches no database at all: `withQueryTimeout(50ms)` around
+      # a `Task.sleep`. So the delay is in the timeout path or in the runtime under
+      # it, and the driver has been blamed for it through five attempted fixes.
+      #
+      # The hypothesis is cooperative thread-pool starvation: these runners are
+      # three-core, the suite runs CPU-bound SQLite queries in parallel, and a
+      # starved runtime delays cancellation delivery no matter how correct the code
+      # is. This step tests that and nothing else.
+      #
+      #   passes alone, fails in the suite  → contention from our own tests
+      #   fails alone                       → the timeout path is genuinely broken,
+      #                                       and deleting the test would have
+      #                                       buried it
+      #
+      # `continue-on-error` because the answer is the point, not the verdict: a red
+      # cross here would say the same thing twice while hiding the full-suite
+      # result underneath it.
+      - name: Timeout cancellation, in isolation
+        continue-on-error: true
+        run: |
+          echo "── the deterministic one: does cancellation reach the body at all"
+          swift test --filter "QueryTimeoutCancellationTests"
+          echo "── the timed ones, alone, with nothing else competing"
+          swift test --filter "returnsWithoutAwaitingTheBody"
+          swift test --filter "timeoutActuallyInterrupts"
+
       # Same skipping behaviour as Linux — no fixtures here either. The macOS job
       # earns its place by covering the Darwin-only halves of the `#if
       # canImport(Darwin)` branches, which the Linux jobs never compile.
