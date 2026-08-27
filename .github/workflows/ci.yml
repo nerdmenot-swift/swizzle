@@ -262,8 +262,22 @@ jobs:
             echo "$(basename "$d"): $(cat "$d/.plugins" 2>/dev/null | tr '\n' ' ')"
           done
 
-      - name: Test
-        run: swift test
+      # **Three runs, not one**, for the same reason the Linux integration job
+      # does it — and this job has already proved the point. Its first run failed
+      # two binlog tests against MySQL 9.1 with a closed connection; its second
+      # passed everything. A failure that shows up in one run of two is not
+      # answered by a green run, and treating one as a verdict is how fifteen
+      # Linux-only failures once accumulated unnoticed.
+      #
+      # Until that close is diagnosed this is the job most likely to catch it
+      # again, and the error now names which side closed the connection — so the
+      # next occurrence arrives with its own cause rather than costing a cycle.
+      - name: Test (three consecutive runs)
+        run: |
+          for run in 1 2 3; do
+            echo "── run $run ──"
+            swift test
+          done
 
       # Runs even when the suite fails: the server logs are usually the only
       # record of why, and a failed job that discards them costs another whole
