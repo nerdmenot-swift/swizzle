@@ -263,20 +263,46 @@ jobs:
           done
 
       # **Three runs, not one**, for the same reason the Linux integration job
-      # does it — and this job has already proved the point. Its first run failed
-      # two binlog tests against MySQL 9.1 with a closed connection; its second
-      # passed everything. A failure that shows up in one run of two is not
-      # answered by a green run, and treating one as a verdict is how fifteen
-      # Linux-only failures once accumulated unnoticed.
+      # does it: a failure that shows up in one run of two is not answered by a
+      # green run, and treating one as a verdict is how fifteen Linux-only
+      # failures once accumulated unnoticed.
       #
-      # Until that close is diagnosed this is the job most likely to catch it
-      # again, and the error now names which side closed the connection — so the
-      # next occurrence arrives with its own cause rather than costing a cycle.
-      - name: Test (three consecutive runs)
+      # **The fixture suites only**, which is the job's whole purpose — Darwin
+      # branches against real servers. The ~800 unit tests already run in the
+      # `macos` job and need no fixtures, so running them again here bought
+      # nothing and cost a great deal: this runner has three cores, and the full
+      # suite three times over beside seven database servers starves the
+      # cooperative thread pool rather than testing anything.
+      #
+      # That starvation is not a theory. It failed here with a **500 ms** connect
+      # deadline measured at 40.7 seconds of wall clock — the task simply did not
+      # run for forty seconds — and with Postgres suites reporting connect
+      # timeouts against a loopback server. Different tests each run, which is the
+      # signature of contention rather than of a defect. The `macos` job already
+      # carries an isolation step built after the same lesson: 0.069 s alone
+      # against 19.1 s in the suite.
+      - name: Test (three consecutive runs, fixture suites)
         run: |
+          set -o pipefail
           for run in 1 2 3; do
             echo "── run $run ──"
-            swift test
+            swift test \
+              --filter SwizzleMySQLIntegrationTests \
+              --filter SwizzlePostgresTests \
+              --filter SwizzleOnlineDDLTests \
+              --filter SwizzleMigrateTests 2>&1 | tee /tmp/run-$run.log
+
+            # A `--filter` that matches nothing exits 0 and reports a green run of
+            # nothing at all, which is the failure mode this project keeps meeting
+            # — a suite that is not running looks exactly like a suite that
+            # passes. Assert that a plausible number of tests actually ran.
+            count=$(grep -oE 'Test run with [0-9]+ test' /tmp/run-$run.log \
+                    | grep -oE '[0-9]+' | tail -1)
+            if [ -z "$count" ] || [ "$count" -lt 300 ]; then
+              echo "only ${count:-0} tests ran — the filters matched almost nothing" >&2
+              exit 1
+            fi
+            echo "── run $run ran $count tests"
           done
 
       # Runs even when the suite fails: the server logs are usually the only
