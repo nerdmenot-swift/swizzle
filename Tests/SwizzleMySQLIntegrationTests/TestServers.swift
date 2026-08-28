@@ -274,6 +274,59 @@ public enum TestServers {
     /// cases in parallel.
     public static let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
 
+    /// How long a fixture connection waits to become ready.
+    ///
+    /// Deliberately far above the driver's own 10-second default, which is right
+    /// for production and wrong here. This suite runs 1442 tests in parallel and
+    /// opens hundreds of short-lived connections across seven servers, and the
+    /// MySQL fixtures authenticate with `caching_sha2_password`, whose cache-miss
+    /// path is an RSA exchange — the most CPU-expensive handshake in the matrix.
+    /// On a contended machine that is a queue, not a fault.
+    ///
+    /// Measured rather than guessed. Running the full suite under 6x CPU
+    /// oversubscription produced 21 failures, and **17 of them were this one
+    /// error**: "the connection was not ready within connect_timeout (10000ms)".
+    /// The rest were consequences of the same contention. Nothing here is
+    /// testing how fast a handshake completes — `ConnectTimeoutTests` and
+    /// `ReadTimeoutTests` set their own short deadlines precisely because they
+    /// are, and they are unaffected by this.
+    ///
+    /// This is not a bound being relaxed to get a green run: no assertion
+    /// depends on it, and a connection that never completes still fails, just
+    /// later. It is the difference between testing the driver and testing the
+    /// machine the driver is running on.
+    public static let connectTimeout: TimeAmount = .seconds(60)
+
+    /// The configuration a fixture connection is built from.
+    ///
+    /// Sixteen suites each carry their own near-identical copy of this block,
+    /// which is how one connect timeout came to be wrong in sixteen places at
+    /// once — the same sibling-asymmetry that has bitten the MySQL and MariaDB
+    /// seed paths and both drivers' connect paths. **Only `BinlogTests` uses this
+    /// so far**: that is where the CI failure was seen, and a bulk rewrite of the
+    /// other fifteen went wrong badly enough to be reverted, so they are being
+    /// moved over deliberately rather than by a script.
+    public static func configuration(for server: MySQLTestServer) -> MySQLConnectionConfiguration {
+        let user = server.primaryUser
+        var configuration = MySQLConnectionConfiguration(
+            address: .hostname(host, port: server.port),
+            username: user.name,
+            password: user.password,
+            database: database,
+            tls: .disable,
+            serverPublicKey: .requestFromServer
+        )
+        configuration.connectTimeout = connectTimeout
+        return configuration
+    }
+
+    /// A plaintext connection to a fixture, as its primary user.
+    public static func connect(_ server: MySQLTestServer) async throws -> MySQLConnection {
+        try await MySQLConnection.connect(
+            configuration: configuration(for: server), on: group.next()
+        )
+    }
+
     // MARK: - Availability
 
     /// Probed once, lazily.
