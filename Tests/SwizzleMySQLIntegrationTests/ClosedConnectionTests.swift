@@ -100,11 +100,24 @@ struct ClosedConnectionTests {
             try await Task.sleep(for: .milliseconds(10))
         }
 
+        // What a kill looks like is up to the server and the timing, and both
+        // shapes are correct: MariaDB usually sends an error packet first, so the
+        // victim's next command fails with `.server(code: 1927, "Connection was
+        // killed")`; if the socket is gone before that arrives, it surfaces as
+        // the close diagnosis instead. The first version of this asserted the
+        // second shape and passed on macOS, passed on Linux once, and failed on
+        // Linux in the next run of the same job — it was asserting a race.
+        //
+        // The invariant that actually matters, and the one this test exists for,
+        // is narrower and holds in both shapes: **a close we did not initiate is
+        // never reported as one we did.** Misattributing a server-side kill to
+        // the caller is precisely the wrong turn that would send someone looking
+        // through their own code for a close they never made.
+        #expect(!text.isEmpty, "the killed connection kept answering")
         #expect(
-            text.contains("peer") || text.contains("connection failed"),
-            "expected a peer-close diagnosis, got: \(text.isEmpty ? "no error at all" : text)"
+            !text.contains("closed by the client"),
+            "a server-side kill was blamed on the client: \(text)"
         )
-        #expect(!text.contains("closed by the client"))
     }
 
     /// `closeImmediately` is the abrupt path — the one a pool takes when it

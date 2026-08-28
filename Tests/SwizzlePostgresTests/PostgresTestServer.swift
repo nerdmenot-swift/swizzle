@@ -61,7 +61,18 @@ enum PostgresTestServer {
     /// certificate is self-signed, and these suites are testing everything
     /// *except* the trust chain. `PostgresURLTrustRootTests` is where the
     /// verifying rungs are exercised.
-    static let url = "\(baseURL)?sslmode=require"
+    ///
+    /// `connect_timeout=60` because this is a fixture, not a deployment. The
+    /// macOS integration job runs the full suite three times over on a
+    /// three-core runner alongside seven database servers, and three Postgres
+    /// suites failed there with "the connection was not ready within
+    /// connect_timeout" — a queue, not a fault. The driver's own default is
+    /// untouched, and `PostgresConnectTimeoutTests` sets its own 300 ms deadline
+    /// precisely because it is testing this, so it is unaffected.
+    ///
+    /// Nothing asserts on it: a connection that never completes still fails,
+    /// just later.
+    static let url = "\(baseURL)?sslmode=require&connect_timeout=60"
 
     /// The same fixture with no query string, for the handful of tests that
     /// append their own parameters.
