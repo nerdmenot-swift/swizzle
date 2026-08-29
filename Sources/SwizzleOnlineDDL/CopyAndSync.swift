@@ -184,19 +184,23 @@ extension MySQLOnlineDDL {
             for row in event.rows {
                 // REPLACE rather than INSERT: the copy may already have put a
                 // row with this key there, and the binlog is the newer truth.
-                _ = try await connection.query(
-                    "REPLACE INTO `\(plan.ghost)` (\(columnList)) VALUES (\(placeholders))",
-                    project(row)
-                )
+                try await withDeadlockRetry("an applied row change") {
+                    _ = try await connection.query(
+                        "REPLACE INTO `\(plan.ghost)` (\(columnList)) VALUES (\(placeholders))",
+                        project(row)
+                    )
+                }
                 applied += 1
             }
 
         case .delete:
             for row in event.rows {
                 guard let id = key(row) else { continue }
-                _ = try await connection.query(
-                    "DELETE FROM `\(plan.ghost)` WHERE `\(plan.primaryKey)` = ?", [id]
-                )
+                try await withDeadlockRetry("an applied row change") {
+                    _ = try await connection.query(
+                        "DELETE FROM `\(plan.ghost)` WHERE `\(plan.primaryKey)` = ?", [id]
+                    )
+                }
                 applied += 1
             }
 
@@ -206,14 +210,18 @@ extension MySQLOnlineDDL {
             for (index, after) in event.updatedRows.enumerated() {
                 if index < event.rows.count, let oldKey = key(event.rows[index]),
                    let newKey = key(after), oldKey != newKey {
+                    try await withDeadlockRetry("an applied row change") {
+                        _ = try await connection.query(
+                            "DELETE FROM `\(plan.ghost)` WHERE `\(plan.primaryKey)` = ?", [oldKey]
+                        )
+                    }
+                }
+                try await withDeadlockRetry("an applied row change") {
                     _ = try await connection.query(
-                        "DELETE FROM `\(plan.ghost)` WHERE `\(plan.primaryKey)` = ?", [oldKey]
+                        "REPLACE INTO `\(plan.ghost)` (\(columnList)) VALUES (\(placeholders))",
+                        project(after)
                     )
                 }
-                _ = try await connection.query(
-                    "REPLACE INTO `\(plan.ghost)` (\(columnList)) VALUES (\(placeholders))",
-                    project(after)
-                )
                 applied += 1
             }
         }
@@ -250,6 +258,53 @@ extension MySQLOnlineDDL {
     /// by the applier, and `INSERT IGNORE`/`REPLACE` make either order safe.
     ///
     /// This is what gh-ost does, and now it is clear why.
+
+    /// Runs a write that may lose an InnoDB deadlock, retrying it.
+    ///
+    /// Only two codes are retried, and both mean "try again" rather than
+    /// "you are wrong":
+    ///
+    ///   - **1213** `ER_LOCK_DEADLOCK`. InnoDB detected a cycle, picked a victim
+    ///     and rolled it back. The victim is expected to retry; that is the
+    ///     entire contract.
+    ///   - **1205** `ER_LOCK_WAIT_TIMEOUT`. No cycle, just a lock held longer
+    ///     than `innodb_lock_wait_timeout`. Same answer.
+    ///
+    /// Everything else propagates untouched. A duplicate key or a missing column
+    /// will not become less true by being run again, and swallowing those into a
+    /// retry loop would turn a clear failure into a slow one.
+    func withDeadlockRetry<T: Sendable>(
+        _ what: String, _ body: () async throws -> T
+    ) async throws -> T {
+        var attempt = 0
+        var delay = configuration.deadlockRetryDelay
+        while true {
+            do {
+                return try await body()
+            } catch let error as MySQLProtocolError {
+                guard case .server(let code, _, let message) = error,
+                      code == 1213 || code == 1205
+                else { throw error }
+
+                attempt += 1
+                guard attempt <= configuration.deadlockRetries else {
+                    throw OnlineDDLError.failed(
+                        "\(what) lost \(attempt) deadlocks in a row and gave up. The last was "
+                        + "\(code): \(message). This is contention rather than a defect — a "
+                        + "quieter primary, a smaller chunkSize or a larger deadlockRetries "
+                        + "are the three ways out. Nothing was swapped; the original table is "
+                        + "untouched."
+                    )
+                }
+                // Doubling, because retrying instantly into the same contended
+                // range tends to reproduce the same deadlock rather than resolve
+                // it — the pause is what lets the winner commit.
+                try await Task.sleep(for: delay)
+                delay = delay * 2
+            }
+        }
+    }
+
     func runCopy(plan: Plan, state: ApplierState) async throws {
         let connection = try await connect()
         defer { connection.closeImmediately() }
@@ -291,7 +346,9 @@ extension MySQLOnlineDDL {
                     """
                 binds = [next]
             }
-            _ = try await connection.query(sql, binds)
+            try await withDeadlockRetry("the chunk copy") {
+                _ = try await connection.query(sql, binds)
+            }
 
             cursor = next
             copied += configuration.chunkSize

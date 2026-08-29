@@ -10,6 +10,71 @@ struct ChannelBindingTests {
 
     /// Three headers, three meanings, and the middle one is the security-relevant
     /// case rather than a formality.
+
+    // MARK: - The DER length parser
+
+    /// Boundaries in `readHeader`, which the mutation sweep found nothing was
+    /// checking: `<= becomes <` and `> becomes >=` both survived on the guard
+    /// that validates a long-form length.
+    ///
+    /// This parser reads a **server-supplied certificate** — untrusted input on
+    /// the authentication path — so its boundaries are worth pinning. The whole
+    /// suite only ever fed it well-formed certificates, which exercise the happy
+    /// path of that guard and none of its edges.
+    ///
+    /// `readHeader` is reached through `@testable`; that is deliberate. Driving
+    /// these cases through a real certificate would mean hand-forging DER with a
+    /// four-byte length and a truncated tail, which is a worse test of the same
+    /// three comparisons.
+    @Test("a long-form length of zero bytes is refused")
+    func indefiniteLengthIsRefused() {
+        // `0x80` is the indefinite form: valid in BER, forbidden in DER, and the
+        // `byteCount > 0` arm is what rejects it. Relaxing that to `>= 0` accepts
+        // it and returns a length of zero, which a caller reads as an empty
+        // element rather than as malformed input.
+        var index = 0
+        #expect(PostgresChannelBinding.readHeader([0x30, 0x80], &index, expecting: 0x30) == nil)
+    }
+
+    /// The upper end of the same guard. Four length bytes is the most this
+    /// accepts, so it has to be accepted — `<= 4` narrowed to `< 4` rejects a
+    /// legitimate certificate rather than a malformed one, which is the more
+    /// expensive direction to be wrong in.
+    @Test("a four-byte length is accepted, a five-byte one is not")
+    func fourByteLengthIsTheCeiling() {
+        var index = 0
+        let fourBytes: [UInt8] = [0x30, 0x84, 0x00, 0x01, 0x00, 0x00]
+        #expect(PostgresChannelBinding.readHeader(fourBytes, &index, expecting: 0x30) == 65536)
+
+        index = 0
+        let fiveBytes: [UInt8] = [0x30, 0x85, 0x00, 0x00, 0x00, 0x01, 0x00]
+        #expect(PostgresChannelBinding.readHeader(fiveBytes, &index, expecting: 0x30) == nil)
+    }
+
+    /// The truncation guard. The length bytes may reach exactly the end of the
+    /// buffer and no further, so `index + byteCount <= der.count` has to admit
+    /// equality — tightening it to `<` rejects a length that ends flush with the
+    /// input, and loosening it reads past the end.
+    @Test("length bytes may end flush with the buffer but not run past it")
+    func truncatedLengthIsRefused() {
+        // Two length bytes, and exactly two remain: the boundary case.
+        var index = 0
+        #expect(PostgresChannelBinding.readHeader([0x30, 0x82, 0x01, 0x00], &index, expecting: 0x30) == 256)
+
+        // Two length bytes promised, one supplied.
+        index = 0
+        #expect(PostgresChannelBinding.readHeader([0x30, 0x82, 0x01], &index, expecting: 0x30) == nil)
+    }
+
+    /// The short form still has to work — it is the branch taken before the
+    /// long-form guard is reached at all.
+    @Test("a short-form length is read directly")
+    func shortFormLength() {
+        var index = 0
+        #expect(PostgresChannelBinding.readHeader([0x30, 0x05], &index, expecting: 0x30) == 5)
+        #expect(index == 2)
+    }
+
     @Test("each binding state produces its own gs2 header")
     func headers() {
         #expect(SCRAMClient.ChannelBinding.none.header == "n,,")

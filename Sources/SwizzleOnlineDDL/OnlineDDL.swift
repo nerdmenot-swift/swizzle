@@ -77,6 +77,37 @@ public struct MySQLOnlineDDL: Sendable {
         /// The error says which case you are in rather than leaving you to guess.
         public var cutoverTimeout: Duration = .seconds(30)
 
+        /// How many times a chunk or an applied event may lose an InnoDB
+        /// deadlock before the migration gives up.
+        ///
+        /// **A deadlock here is expected, not exceptional.** The copy runs
+        /// `INSERT IGNORE … SELECT` over a range of the original while the
+        /// applier writes `REPLACE`s into the ghost and the application keeps
+        /// writing to both — three writers on overlapping key ranges is the
+        /// textbook shape for `ER_LOCK_DEADLOCK`, and InnoDB resolves it by
+        /// choosing a victim and rolling it back. The documented response is to
+        /// retry the victim, which is what gh-ost and pt-online-schema-change
+        /// both do.
+        ///
+        /// Nothing retried, so a single transient deadlock aborted the whole
+        /// migration — after however many chunks it had already copied. CI found
+        /// it on the one test that writes throughout the copy, on the run where
+        /// nine fixture servers made the machine slow enough for the windows to
+        /// overlap.
+        ///
+        /// Every statement retried here is idempotent by construction:
+        /// `INSERT IGNORE` yields to a row already present, `REPLACE` overwrites
+        /// with the newer truth, and `DELETE … WHERE key = ?` is a no-op the
+        /// second time. Retrying cannot double-apply.
+        public var deadlockRetries: Int = 10
+
+        /// How long to wait after losing a deadlock, doubling each attempt.
+        ///
+        /// Backed off rather than immediate: retrying instantly against the same
+        /// contended range tends to reproduce the same deadlock, and the point of
+        /// the pause is to let the winning transaction commit and release.
+        public var deadlockRetryDelay: Duration = .milliseconds(50)
+
 
         public init() {}
     }

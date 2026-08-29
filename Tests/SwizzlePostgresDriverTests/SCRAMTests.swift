@@ -181,6 +181,60 @@ struct SCRAMTests {
         #expect(SCRAMClient.normalize("p@ssw0rd!") == Array("p@ssw0rd!".utf8))
     }
 
+
+    /// The fast path's condition, which the mutation sweep found nothing was
+    /// checking.
+    ///
+    /// `normalize` short-circuits to raw UTF-8 when every character is ASCII and
+    /// not whitespace, **or is a plain space** — and the only passwords tested
+    /// were `pencil` and `p@ssw0rd!`, neither of which contains a space or a
+    /// non-ASCII character. Two mutants survived on that one line: flipping
+    /// `$0 == " "` to `!=`, and flipping the `&&` to `||`. Each changes the
+    /// answer only for an input no test supplied.
+    ///
+    /// This matters beyond the coverage number. Wrong normalisation is not a
+    /// crash — it is a client that computes a different salted password from the
+    /// server and reports "authentication failed" for a password the user typed
+    /// correctly, which is close to undiagnosable from the outside.
+    @Test("a password containing a space keeps the space")
+    func spacesSurviveTheFastPath() {
+        // The `|| $0 == " "` arm exists precisely so this stays on the fast path
+        // rather than being NFKC-folded. Flipping it to `!=` sends this through
+        // the mapping instead.
+        #expect(SCRAMClient.normalize("correct horse") == Array("correct horse".utf8))
+        #expect(SCRAMClient.normalize(" ") == Array(" ".utf8))
+    }
+
+    /// SASLprep's compatibility mapping, which is the whole reason the slow path
+    /// exists. `U+FB01` is the `fi` ligature and NFKC decomposes it to two ASCII
+    /// letters, so this is a transformation that is impossible to pass by
+    /// accident.
+    @Test("a non-ASCII password is compatibility-normalised")
+    func nonASCIIIsNormalised() {
+        #expect(SCRAMClient.normalize("pass\u{FB01}x") == Array("passfix".utf8))
+        // Flipping the `&&` to `||` puts this on the fast path and returns the
+        // ligature's own three UTF-8 bytes instead.
+        #expect(SCRAMClient.normalize("pass\u{FB01}x") != Array("pass\u{FB01}x".utf8))
+    }
+
+    /// The documented mapping step: a non-ASCII space becomes `U+0020` *before*
+    /// normalisation, so two passwords that look identical to a user hash the
+    /// same.
+    @Test("non-ASCII spaces map to a plain space")
+    func nonASCIISpacesAreMapped() {
+        #expect(SCRAMClient.normalize("a\u{00A0}b") == Array("a b".utf8))
+        #expect(SCRAMClient.normalize("a\u{2003}b") == Array("a b".utf8))
+    }
+
+    /// ASCII whitespace that is *not* a plain space — a tab — fails the fast
+    /// path's first arm and is not rescued by the second, so it takes the
+    /// mapping. Included because it is the boundary between the two arms and
+    /// nothing else covers it.
+    @Test("a tab takes the mapping path rather than the fast path")
+    func tabsTakeTheSlowPath() {
+        #expect(SCRAMClient.normalize("a\tb") == Array("a b".utf8))
+    }
+
     /// Constant time is the point; this only checks it still answers correctly.
     @Test("the MAC comparison is correct as well as constant-time")
     func constantTimeComparison() {
