@@ -47,8 +47,15 @@ FILTER="${2:-}"
 #
 # `git worktree` rather than `cp -r`: it gives a clean checkout of HEAD with no
 # `.build` to copy, and removing it cannot touch the original.
+# `$TMPDIR` on macOS ends in a slash, and the guard below compares this path
+# against one that has been through `cd … && pwd` — which normalises `//` to `/`.
+# So the arena was `…/T//swizzle-mutation/tree`, every resolved file was
+# `…/T/swizzle-mutation/tree/…`, the prefix test failed for every file, and the
+# safety check refused to mutate anything at all. A guard that stops the tool
+# running is worth as little as one that never fires.
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="${TMPDIR:-/tmp}/swizzle-mutation"
+TMPROOT="${TMPDIR:-/tmp}"
+WORK="${TMPROOT%/}/swizzle-mutation"
 ARENA="$WORK/tree"
 rm -rf "$ARENA"
 mkdir -p "$WORK"
@@ -95,6 +102,10 @@ cleanup() {
   git -C "$SOURCE_ROOT" worktree remove --force "$ARENA" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
+# Normalised from the filesystem rather than from the string that built it,
+# so the guard below compares like with like no matter what $TMPDIR looked
+# like — a symlinked or doubly-slashed temp directory included.
+ARENA="$(cd "$ARENA" && pwd)"
 cd "$ARENA" || exit 1
 
 REPORT="$WORK/survivors.txt"
