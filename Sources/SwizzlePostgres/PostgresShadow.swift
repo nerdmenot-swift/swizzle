@@ -45,17 +45,42 @@ extension PostgresEngine {
         let maintenanceURL = url
         let maintenance = try await connect(url: maintenanceURL)
 
-        do {
-            // Dropped first in case a previous run died before its own cleanup.
-            _ = try await maintenance.executor.execute(
-                sql: "DROP DATABASE IF EXISTS \(quoteIdentifier(name)) WITH (FORCE)", bindings: []
-            )
-            _ = try await maintenance.executor.execute(
-                sql: "CREATE DATABASE \(quoteIdentifier(name))", bindings: []
-            )
-        } catch {
-            maintenance.close()
-            throw error
+        // `DROP` then `CREATE` is **not atomic**, and the gap between them is a
+        // real race rather than a theoretical one. Two agents creating the same
+        // shadow — two CI jobs running codegen against one server, or a developer
+        // and a hook — both drop, both create, and one loses with
+        //
+        //     duplicate key value violates unique constraint
+        //     "pg_database_datname_index"
+        //
+        // The name makes it likely rather than unlikely: it is derived from a
+        // label, so two runs of the same migration set collide *by design*. This
+        // reproduced roughly one run in three of the local suite.
+        //
+        // Retried once, and only for that error. Losing the race means the other
+        // creator got there first, so dropping and creating again is exactly the
+        // right response — and the second failure is reported rather than looped
+        // over, because two collisions in a row is contention this cannot solve
+        // by trying harder.
+        var attempt = 0
+        while true {
+            do {
+                // Dropped first in case a previous run died before its own cleanup.
+                _ = try await maintenance.executor.execute(
+                    sql: "DROP DATABASE IF EXISTS \(quoteIdentifier(name)) WITH (FORCE)",
+                    bindings: []
+                )
+                _ = try await maintenance.executor.execute(
+                    sql: "CREATE DATABASE \(quoteIdentifier(name))", bindings: []
+                )
+                break
+            } catch {
+                attempt += 1
+                guard attempt == 1, isDuplicateDatabase(error) else {
+                    maintenance.close()
+                    throw error
+                }
+            }
         }
 
         configuration.database = name
@@ -76,6 +101,23 @@ extension PostgresEngine {
     /// `swizzle_shadow_` then the label, reduced to characters an identifier can
     /// hold. A label is a directory name or a test name, so it cannot be trusted
     /// to be one already.
+
+    /// True for `23505 unique_violation` on `pg_database_datname_index`, which is
+    /// how a lost `CREATE DATABASE` race arrives.
+    ///
+    /// Matched on the SQLSTATE rather than the message: the text is localised by
+    /// `lc_messages` and would stop matching on a server configured in any
+    /// language but English, which is a spectacularly quiet way for a retry to
+    /// stop working. `23505` is the same five characters everywhere.
+    ///
+    /// Narrow on purpose. A unique violation from anywhere else in this function
+    /// is not a race this can win by trying again, and swallowing it would hide a
+    /// real failure behind a retry.
+    private static func isDuplicateDatabase(_ error: any Error) -> Bool {
+        guard let connectionError = error as? PostgresConnectionError else { return false }
+        return connectionError.sqlState == "23505"
+    }
+
     public static func shadowName(_ label: String) -> String {
         let sanitised = label.lowercased().map { character -> Character in
             character.isLetter || character.isNumber ? character : "_"

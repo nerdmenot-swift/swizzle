@@ -110,4 +110,70 @@ struct StatementCacheTests {
         let unrelated = PostgresServerMessage(fields: [0x43: "42601", 0x4D: "cached plan"])
         #expect(!unrelated.indicatesStaleCachedPlan)
     }
+
+    /// Superseding one query must not disturb the eviction order of the others.
+    ///
+    /// `supersede` above checks the name handed back and stops there, so the
+    /// mutation sweep could flip `usageOrder.removeAll { $0 == existing }` to
+    /// `!= existing` — which removes **everything except** the superseded entry —
+    /// and nothing noticed. The cache still answers `name(for:)` correctly from
+    /// its dictionaries; only the eviction order is destroyed, and that surfaces
+    /// later as the wrong statement being closed while it is still in use.
+    @Test("superseding a query leaves the other entries' order intact")
+    func supersedeKeepsLRUOrder() {
+        var cache = PostgresStatementCache(capacity: 3)
+        let one = cache.insert("SELECT 1").name
+        _ = cache.insert("SELECT 2")
+        _ = cache.insert("SELECT 3")
+
+        // Re-parse the newest. `SELECT 1` is still the oldest and must stay so.
+        _ = cache.insert("SELECT 3")
+
+        let (_, evicted) = cache.insert("SELECT 4")
+        #expect(
+            evicted == one,
+            "the oldest entry should have gone; the supersession must not have reordered it"
+        )
+    }
+
+    /// And `remove(name:)` — used when the server rejects a statement — takes out
+    /// exactly one entry.
+    ///
+    /// It had no test at all, which is why the same inversion survived there too.
+    /// With `!= name` the call empties the usage order of everything *but* the
+    /// statement being forgotten, so the cache believes its only live statement
+    /// is the one just discarded.
+    @Test("removing one statement leaves the rest tracked and ordered")
+    func removeTakesExactlyOne() {
+        var cache = PostgresStatementCache(capacity: 3)
+        let one = cache.insert("SELECT 1").name
+        let two = cache.insert("SELECT 2").name
+        _ = cache.insert("SELECT 3")
+
+        let removed = cache.remove(name: two)
+        #expect(removed)
+        #expect(cache.count == 2)
+        #expect(cache.name(for: "SELECT 2") == nil, "the removed one is gone")
+        #expect(cache.name(for: "SELECT 1") != nil, "the others are not")
+        #expect(cache.name(for: "SELECT 3") != nil)
+
+        // `name(for:)` above touched 1 then 3, so 1 is the oldest again.
+        _ = cache.insert("SELECT 4")
+        let (_, evicted) = cache.insert("SELECT 5")
+        #expect(evicted != nil, "the cache is full again and must evict")
+        #expect(evicted != two, "an already-removed statement must never be evicted twice")
+    }
+
+    /// Removing something that was never there is not an error and changes
+    /// nothing — the server can reject a name the cache has already dropped.
+    @Test("removing an unknown name reports false and disturbs nothing")
+    func removeUnknown() {
+        var cache = PostgresStatementCache(capacity: 2)
+        let one = cache.insert("SELECT 1").name
+        let missing = cache.remove(name: "swizzle_never")
+        #expect(!missing)
+        #expect(cache.count == 1)
+        #expect(cache.name(for: "SELECT 1") == one)
+    }
+
 }
