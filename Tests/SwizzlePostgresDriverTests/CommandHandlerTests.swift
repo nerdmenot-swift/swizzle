@@ -29,8 +29,13 @@ struct CommandHandlerTests {
         let counter = ReadCounter()
         let handler: PostgresCommandHandler
 
-        init(statementCacheCapacity: Int = PostgresStatementCache.defaultCapacity) throws {
-            handler = PostgresCommandHandler(statementCacheCapacity: statementCacheCapacity)
+        init(
+            statementCacheCapacity: Int = PostgresStatementCache.defaultCapacity,
+            readTimeout: TimeAmount? = nil
+        ) throws {
+            handler = PostgresCommandHandler(
+                statementCacheCapacity: statementCacheCapacity, readTimeout: readTimeout
+            )
             try channel.pipeline.syncOperations.addHandler(counter)
             try channel.pipeline.syncOperations.addHandler(handler)
             try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 5432)).wait()
@@ -65,6 +70,19 @@ struct CommandHandlerTests {
             channel.pipeline.fireChannelReadComplete()
         }
 
+
+        /// Moves the embedded event loop's clock forward, firing anything
+        /// scheduled to run by then.
+        ///
+        /// Advancing rather than sleeping: the read deadline is a scheduled task
+        /// on this loop, so its clock is under the test's control and the result
+        /// is exact. A `Task.sleep` here would be approximately right on an idle
+        /// machine and wrong on a loaded one, which is the bug class this suite
+        /// has spent the most time on.
+        func advance(by amount: TimeAmount) {
+            (channel.eventLoop as! EmbeddedEventLoop).advanceTime(by: amount)
+        }
+
         func sentMessages() throws -> [PostgresFrontendMessage] {
             var messages: [PostgresFrontendMessage] = []
             while let message = try channel.readOutbound(as: PostgresFrontendMessage.self) {
@@ -72,6 +90,70 @@ struct CommandHandlerTests {
             }
             return messages
         }
+    }
+
+
+    // MARK: - The per-command read deadline
+
+    /// The `running` check inside the deadline, which the mutation sweep found
+    /// nothing was pinning: flipping `self.running != nil` to `== nil` inverts
+    /// which connections the timeout kills, and every test still passed.
+    ///
+    /// `PostgresReadTimeoutTests` exists and did not catch it, for a reason worth
+    /// recording: it points at a silent server and sets a short *connect* timeout
+    /// as well, so the connect deadline fires first and the assertion is
+    /// satisfied whether or not the read deadline works at all.
+    ///
+    /// Driven on an `EmbeddedEventLoop`, whose clock is advanced rather than
+    /// waited on — so this is exact instead of approximately two seconds, and
+    /// there is no sleeping bound to be wrong about under load.
+    @Test("a command with no reply is failed once the read timeout elapses")
+    func readTimeoutFiresWhileACommandIsRunning() throws {
+        let harness = try Harness(readTimeout: .seconds(2))
+        let promise = harness.channel.eventLoop.makePromise(of: PostgresQueryResult.self)
+        harness.send(.query(.simple("SELECT pg_sleep(60)"), promise))
+
+        // Just short of the deadline: still waiting, as a slow query should.
+        harness.advance(by: .milliseconds(1_999))
+        #expect(harness.channel.isActive, "it must not give up early")
+
+        harness.advance(by: .milliseconds(2))
+        #expect(throws: (any Error).self) { try promise.futureResult.wait() }
+        #expect(!harness.channel.isActive, "the connection is closed, not left waiting")
+    }
+
+    /// The other half, and the reason the `running` check exists at all: an idle
+    /// pooled connection reads nothing by definition. Failing on that would close
+    /// exactly the connections that are behaving, which empties a pool under no
+    /// load at all.
+    @Test("an idle connection is left alone however long it stays quiet")
+    func readTimeoutIgnoresIdleConnections() throws {
+        let harness = try Harness(readTimeout: .milliseconds(50))
+        harness.advance(by: .seconds(60))
+        #expect(harness.channel.isActive, "an idle connection must survive")
+    }
+
+    /// And the deadline is disarmed when the command ends, rather than left to
+    /// fire against whatever comes next. `hasArmedDeadline` is exposed for
+    /// exactly this.
+    @Test("the deadline is disarmed when the command completes")
+    func deadlineIsCancelledOnCompletion() throws {
+        let harness = try Harness(readTimeout: .seconds(2))
+        let promise = harness.channel.eventLoop.makePromise(of: PostgresQueryResult.self)
+        harness.send(.query(.simple("SELECT 1"), promise))
+        #expect(harness.handler.hasArmedDeadline, "a running command should arm it")
+
+        try harness.receive([
+            .rowDescription([column("id")]),
+            .dataRow([int8(1)]),
+            .commandComplete(tag: "SELECT 1"),
+            .readyForQuery(.idle),
+        ])
+        _ = try promise.futureResult.wait()
+
+        #expect(!harness.handler.hasArmedDeadline, "it should be disarmed once the reply lands")
+        harness.advance(by: .seconds(10))
+        #expect(harness.channel.isActive, "a finished command must not close the connection later")
     }
 
     func column(_ name: String, _ oid: PostgresOID = .int8) -> PostgresColumnDescription {

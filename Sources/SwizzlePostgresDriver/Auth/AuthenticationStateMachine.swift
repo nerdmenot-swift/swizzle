@@ -88,6 +88,12 @@ public struct PostgresAuthenticationStateMachine: Sendable {
         }
         // Sorted, so the startup packet is deterministic — which matters for
         // tests and for anyone reading a packet capture.
+        //
+        // The mutation sweep flips this `<` to `<=` and nothing catches it, which
+        // is correct rather than a gap: `parameters` is a `[String: String]`, so
+        // the comparator is never handed two equal keys and the two orderings are
+        // indistinguishable. Recorded here rather than answered with a test,
+        // because the test would assert nothing.
         for (key, value) in configuration.parameters.sorted(by: { $0.key < $1.key }) {
             parameters.append((key, value))
         }
