@@ -5,9 +5,9 @@ and the command is given so it can be re-checked.
 
 | target | status | verified by |
 |---|---|---|
-| macOS (arm64) | ✅ builds, 1440 tests pass | `swift test` (with `./Scripts/test-servers.sh up`) |
-| Linux glibc (Swift 6.3.3) | ✅ builds, 784 run + 591 skipped, 0 failures | `docker run --rm -v "$PWD":/src -w /src swift:6.3.3 swift test --scratch-path .build-linux` |
-| Linux glibc (Swift 6.0.3) | ✅ builds, 1440 tests pass | `docker run --rm -v "$PWD":/src:ro swift:6.0.3 …` — the floor `swift-tools-version` claims |
+| macOS (arm64) | ✅ builds, 1447 tests pass | `swift test` (with `./Scripts/test-servers.sh up`) |
+| Linux glibc, x86_64 + aarch64 (6.3.3) | ✅ builds, tests pass on both | CI runs x86_64 on `ubuntu-latest` and aarch64 on `ubuntu-24.04-arm`; locally, `docker run --rm -v "$PWD":/src swift:6.3.3` is aarch64 on an M-series Mac |
+| Linux glibc (Swift 6.0.3) | ✅ builds, 1447 tests pass | `docker run --rm -v "$PWD":/src:ro swift:6.0.3 …` — the floor `swift-tools-version` claims |
 | Linux static musl, aarch64 | ✅ library builds | `swift build --swift-sdk aarch64-swift-linux-musl` |
 | Linux static musl, x86_64 | ✅ library builds | `swift build --swift-sdk x86_64-swift-linux-musl` |
 | iOS (arm64, v17) | ✅ library targets build | `swift build --target … -Xswiftc -sdk -Xswiftc "$(xcrun --sdk iphoneos --show-sdk-path)" …`, in CI |
@@ -273,22 +273,34 @@ Both were fixed rather than floored away.
 
 ### What CI does not cover
 
-**The integration suites on macOS.** `linux-integration` runs all seven fixtures
-on x86_64 Linux and the suite three times over, so the protocol work is no longer
-verified only on a developer machine — but the macOS job still skips every
-integration suite, and macOS is the one platform where the drivers compile a
-different set of branches. `TCPKeepalive.swift` reaches for different socket
-option constants under `#if canImport(Darwin)`, and those are only exercised
-against a real connection. Closing this means starting the fixtures on the macOS
-runner, which the script already supports.
+Kept honest by deleting the entries that were closed rather than letting the list
+describe a matrix that has not existed for a while. What remains is real.
 
-**Anything not arm64 or x86_64**, and anything not macOS or Linux. Windows is
-untested and unclaimed. iOS is compiled but never run — there is no simulator
-step, so the claim is "it builds", not "it works".
+**The static musl builds never run a test, and cannot.** This is a toolchain
+constraint rather than a decision: the static Linux SDK does not ship the
+`Testing` module, so `swift test --swift-sdk x86_64-swift-linux-musl` fails to
+compile the test targets with `no such module 'Testing'` before it reaches a
+single assertion. Building is therefore the whole claim — which still catches the
+thing musl is here for, a glibc-shaped symbol that does not exist there. Verified
+by trying it, not assumed.
 
-**MariaDB 10.11 and Postgres other than 16.** The fixture matrix now covers
-MariaDB 11.4/11.8/12.2, MySQL 8.0/8.4/9.1 and Postgres 16. The index publishes
-Postgres 14 through 18, so widening that is cheap and has not been done.
+**MariaDB 10.11.** Wanted, and blocked on the binary index rather than on us:
+doze-binaries publishes 11.4 upward and no 10.x at all, so there is nothing to
+pin. The fixture would otherwise be a Homebrew or apt dependency, which is the
+variance `Scripts/test-servers.sh` exists to remove.
+
+**Postgres 15 and 17.** The matrix brackets the range — 14, 16, 18 — rather than
+filling it. A bug that affects 15 but neither 14 nor 18 is possible and is not
+worth two more servers in every CI run.
+
+**iOS is compiled and never run.** There is no simulator step, so the claim is
+"it builds", not "it works".
+
+**Windows.** Untested and unclaimed.
+
+**Intel macOS.** Both macOS jobs run on arm64 runners. The MariaDB index has no
+`x86_64-apple-darwin` builds either, so the fixtures could not run there even if
+a runner were added.
 
 ## Integration tests on Linux
 

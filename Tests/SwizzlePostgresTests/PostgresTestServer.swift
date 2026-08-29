@@ -83,6 +83,55 @@ enum PostgresTestServer {
     /// nineteen copies nobody is counting.
     static let baseURL = "postgres://swizzle:swizzlepass@127.0.0.1:5432/swizzle_test"
 
+
+    // MARK: - The version matrix
+
+    /// One fixture server.
+    ///
+    /// Added alongside `url` and `port` rather than replacing them. Nineteen
+    /// suites target the single fixture and are testing the driver, not the
+    /// server's version; rewriting them all to be version-parameterised would be
+    /// a large change for coverage that `PostgresVersionMatrixTests` gets on its
+    /// own.
+    struct Instance: Sendable, CustomStringConvertible {
+        let name: String
+        let port: Int
+
+        /// The major the fixture is pinned to, asserted against what the server
+        /// reports — so a matrix that silently ran three copies of one version
+        /// cannot pass.
+        let major: Int
+
+        var description: String { "\(name):\(port)" }
+
+        var url: String {
+            "postgres://swizzle:swizzlepass@\(host):\(port)/swizzle_test"
+                + "?sslmode=require&connect_timeout=60"
+        }
+    }
+
+    /// Oldest still supported upstream, and where multiranges arrived.
+    static let postgres14 = Instance(name: "postgres14", port: 5433, major: 14)
+
+    /// The version developed against, and the one every other suite uses.
+    static let postgres16 = Instance(name: "postgres16", port: 5432, major: 16)
+
+    /// Current. Adds direct TLS negotiation, which this driver does not
+    /// implement — connecting at all against it is the point.
+    static let postgres18 = Instance(name: "postgres18", port: 5434, major: 18)
+
+    static let all = [postgres14, postgres16, postgres18]
+
+    /// The fixtures actually running, probed once.
+    ///
+    /// Filtered rather than assumed, for the same reason the MySQL matrix reads
+    /// `.plugins` from disk: a developer may have only the one server up, and a
+    /// suite that fails because a fixture is absent teaches people to ignore it.
+    static let available: [Instance] = all.filter { canConnect(port: $0.port) }
+
+    static let matrixSkipReason: Comment =
+        "No Postgres fixtures reachable — start them with ./Scripts/test-servers.sh up"
+
     /// Computed once. A probe per suite would be a syscall per suite, and the
     /// answer cannot change mid-run in any way worth handling.
     static let isAvailable: Bool = canConnect(port: port)

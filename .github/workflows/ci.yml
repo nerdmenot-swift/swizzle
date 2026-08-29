@@ -29,14 +29,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Linux, on both architectures this library claims.
+  #
+  # It ran only on x86_64 for its whole life, while `docs/platforms.md` listed
+  # aarch64 as supported on the strength of a *cross-build* that never executed a
+  # test. The two are not the same claim: byte order is shared, but alignment,
+  # atomics and the sizes the packet codecs assume are exactly the sort of thing
+  # that compiles everywhere and misbehaves on one.
+  #
+  # `ubuntu-24.04-arm` is a native ARM runner rather than emulation, so a timing
+  # test here means what it says. It is free for public repositories.
   linux:
-    name: Linux glibc
-    runs-on: ubuntu-latest
+    name: Linux glibc (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     # Pinned to the toolchain developed against, so a failure here is the
-    # platform rather than a version difference.
+    # platform rather than a version difference. The image is multi-arch.
     container: swift:6.3.3
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+
+      - name: Which machine
+        run: |
+          uname -m
+          swift --version
 
       - name: Build
         run: swift build --build-tests
@@ -44,8 +67,7 @@ jobs:
       # The MySQL and Postgres suites skip: they need the fixtures from
       # ./Scripts/test-servers.sh, which are not running here. What does run is
       # every state machine, every codec, the query builder and the whole SQLite
-      # suite — around 780 of the 1375, and the portion where a platform
-      # difference actually shows up.
+      # suite — the portion where a platform difference actually shows up.
       #
       # Those suites *skipping* rather than failing is itself load-bearing, and
       # is what `test-hygiene.sh` below enforces.
@@ -54,8 +76,6 @@ jobs:
 
       - name: Test hygiene
         run: ./Scripts/test-hygiene.sh
-
-
   linux-integration:
     name: Linux integration (real servers)
     runs-on: ubuntu-latest
