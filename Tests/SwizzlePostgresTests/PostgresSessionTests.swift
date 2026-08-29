@@ -298,4 +298,44 @@ struct PostgresSessionTests {
         let rows = try await connection.query("SELECT 42").rows
         #expect(rows.first?.first == .int(42))
     }
+
+    // MARK: - Closing
+
+    /// Closing is idempotent, and the mutation sweep found that nothing said so.
+    ///
+    /// `close()` swallows `ChannelError.alreadyClosed` because Postgres answers
+    /// `Terminate` by closing the socket itself — so `channel.close()` races the
+    /// server's own close and loses often enough to matter, on Linux especially.
+    /// Flipping that `==` to `!=` makes the driver rethrow exactly the error it
+    /// was written to absorb while swallowing the ones it should not, and every
+    /// test still passed.
+    ///
+    /// This is not a hypothetical tidiness argument. Pools close connections on
+    /// eviction and callers close them in `defer`; a `close()` that throws when
+    /// the peer got there first turns an ordinary shutdown into an error on a
+    /// path where nobody is prepared to handle one.
+    @Test("closing a connection twice is not an error")
+    func closingTwiceIsNotAnError() async throws {
+        let connection = try await PostgresConnection.connect(
+            configuration: PostgresConnectionConfiguration(swizzleURL: PostgresTestServer.url),
+            on: MultiThreadedEventLoopGroup.singleton.next()
+        )
+        try await connection.shutdown()
+        // The second one has nothing left to close, which is the case the
+        // `alreadyClosed` arm exists for.
+        try await connection.shutdown()
+    }
+
+    /// And the same when the abrupt path got there first — which is what a pool
+    /// does when it discards a connection rather than returning it.
+    @Test("a graceful close after an abrupt one is not an error")
+    func gracefulCloseAfterImmediateClose() async throws {
+        let connection = try await PostgresConnection.connect(
+            configuration: PostgresConnectionConfiguration(swizzleURL: PostgresTestServer.url),
+            on: MultiThreadedEventLoopGroup.singleton.next()
+        )
+        connection.closeImmediately()
+        try await connection.shutdown()
+    }
+
 }

@@ -301,14 +301,30 @@ public final class PostgresConnection: Sendable {
     ) async throws -> PostgresQueryResult {
         var result = try await query(sql, bindings)
 
-        let unresolved = result.columns.map(\.dataTypeOID).filter {
-            PostgresOID(rawValue: $0) == nil && typeRegistry.known($0) == nil
-        }
+        let unresolved = Self.unresolvedOIDs(
+            result.columns.map(\.dataTypeOID), known: { typeRegistry.known($0) != nil }
+        )
         guard !unresolved.isEmpty else { return result }
 
         try await typeRegistry.resolve(unresolved, on: self)
         result.redecode(with: typeRegistry)
         return result
+    }
+
+    /// Which of these OIDs the driver cannot already name.
+    ///
+    /// Extracted so it can be tested, because it could not be otherwise and the
+    /// mutation sweep noticed: relaxing the `&&` to `||` leaves every result
+    /// correct and every test passing, while turning a purely local check into a
+    /// **catalog round trip on every query**. A built-in OID would be sent for
+    /// resolution merely because the user-type registry had not heard of it —
+    /// which it never will, because built-ins are not user types.
+    ///
+    /// That is the same class as the quadratic decode this driver already
+    /// carried for months: correct output, silently paying for it. A test that
+    /// only checks the rows would never see it.
+    static func unresolvedOIDs(_ oids: [UInt32], known: (UInt32) -> Bool) -> [UInt32] {
+        oids.filter { PostgresOID(rawValue: $0) == nil && !known($0) }
     }
 
     /// Runs a statement and collects its result.

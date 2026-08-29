@@ -68,4 +68,38 @@ struct ConnectionMetadataTests {
         #expect(Self.metadata(["server_version": "16.15"]).serverVersion == "16.15")
         #expect(Self.metadata([:]).serverVersion == nil)
     }
+
+    /// Which OIDs get sent to the catalog, which is a performance property and
+    /// therefore one no result-checking test can see.
+    ///
+    /// The sweep relaxed the `&&` in this predicate to `||` and nothing failed:
+    /// every row still decoded correctly, and the driver had quietly started
+    /// asking the server about `int8` on every query. Same class as the
+    /// quadratic decode this driver carried for months — right answers, paid for
+    /// twice.
+    @Test("a built-in OID is never sent for resolution")
+    func builtInsAreNeverUnresolved() {
+        // Nothing is in the registry, which is the state that makes `||` and
+        // `&&` differ: with `||`, every one of these becomes "unresolved".
+        let builtIns = [PostgresOID.int8, .text, .bool, .timestamptz].map(\.rawValue)
+        #expect(PostgresConnection.unresolvedOIDs(builtIns, known: { _ in false }).isEmpty)
+    }
+
+    /// The other half: an OID the driver does not recognise and the registry has
+    /// not learned is exactly what the round trip is for.
+    @Test("an unknown OID is reported once and only while it stays unknown")
+    func unknownOIDsAreResolvedOnce() {
+        let custom: UInt32 = 99_999
+        #expect(PostgresConnection.unresolvedOIDs([custom], known: { _ in false }) == [custom])
+        // Once the registry has learned it, it must not be asked for again.
+        #expect(PostgresConnection.unresolvedOIDs([custom], known: { $0 == custom }).isEmpty)
+    }
+
+    /// A mixed projection asks about the custom column and nothing else.
+    @Test("only the unknown columns of a mixed row are resolved")
+    func mixedProjection() {
+        let oids = [PostgresOID.int8.rawValue, 99_999, PostgresOID.text.rawValue]
+        #expect(PostgresConnection.unresolvedOIDs(oids, known: { _ in false }) == [99_999])
+    }
+
 }
