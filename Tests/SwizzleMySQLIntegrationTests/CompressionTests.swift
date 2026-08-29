@@ -24,15 +24,7 @@ struct CompressionTests {
         compression: MySQLConnectionConfiguration.Compression = .zlib(),
         tls: MySQLConnectionConfiguration.TLSMode = .disable
     ) -> MySQLConnectionConfiguration {
-        let user = server.primaryUser
-        var config = MySQLConnectionConfiguration(
-            address: .hostname(TestServers.host, port: server.port),
-            username: user.name,
-            password: user.password,
-            database: TestServers.database,
-            tls: tls,
-            serverPublicKey: .requestFromServer
-        )
+        var config = TestServers.configuration(for: server, tls: tls)
         config.compression = compression
         // Well above the largest fixture below, so a failure is a framing bug
         // rather than the guard rail firing.

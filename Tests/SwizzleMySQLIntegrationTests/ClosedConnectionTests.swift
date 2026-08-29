@@ -28,6 +28,7 @@ struct ClosedConnectionTests {
         var configuration = try MySQLConnectionConfiguration(
             url: "mysql://\(user.name):\(user.password)@\(TestServers.host):\(server.port)"
                 + "/\(TestServers.database)?allow_public_key_retrieval=true&tls=require"
+                + "&connect_timeout=\(TestServers.connectTimeout.nanoseconds / 1_000_000_000)"
         )
         configuration.database = TestServers.database
         return try await MySQLConnection.connect(

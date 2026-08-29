@@ -26,16 +26,10 @@ struct TimeZoneTests {
     static func connect(
         _ server: MySQLTestServer, timeZone: MySQLSessionTimeZone = .server
     ) async throws -> MySQLConnection {
-        let user = server.primaryUser
+        var config = TestServers.configuration(for: server)
+        config.timeZone = timeZone
         return try await MySQLConnection.connect(
-            configuration: MySQLConnectionConfiguration(
-                address: .hostname(TestServers.host, port: server.port),
-                username: user.name, password: user.password,
-                database: TestServers.database, tls: .disable,
-                timeZone: timeZone,
-                serverPublicKey: .requestFromServer
-            ),
-            on: TestServers.group.next()
+            configuration: config, on: TestServers.group.next()
         )
     }
 

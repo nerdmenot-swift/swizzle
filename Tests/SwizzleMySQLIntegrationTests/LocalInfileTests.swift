@@ -23,15 +23,7 @@ struct LocalInfileTests {
         _ server: MySQLTestServer,
         localInfile: MySQLConnectionConfiguration.LocalInfile
     ) -> MySQLConnectionConfiguration {
-        let user = server.primaryUser
-        var config = MySQLConnectionConfiguration(
-            address: .hostname(TestServers.host, port: server.port),
-            username: user.name,
-            password: user.password,
-            database: TestServers.database,
-            tls: .disable,
-            serverPublicKey: .requestFromServer
-        )
+        var config = TestServers.configuration(for: server)
         config.localInfile = localInfile
         return config
     }

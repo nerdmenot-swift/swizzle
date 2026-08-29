@@ -18,18 +18,7 @@ import Testing
 struct BulkExecuteTests {
 
     static func connect(_ server: MySQLTestServer) async throws -> MySQLConnection {
-        let user = server.primaryUser
-        return try await MySQLConnection.connect(
-            configuration: MySQLConnectionConfiguration(
-                address: .hostname(TestServers.host, port: server.port),
-                username: user.name,
-                password: user.password,
-                database: TestServers.database,
-                tls: .disable,
-                serverPublicKey: .requestFromServer
-            ),
-            on: TestServers.group.next()
-        )
+        try await TestServers.connect(server)
     }
 
     static func makeTable(_ connection: MySQLConnection) async throws -> String {

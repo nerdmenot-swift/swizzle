@@ -19,17 +19,8 @@ struct WiringTests {
         user: MySQLTestServer.TestUser? = nil,
         tls: MySQLConnectionConfiguration.TLSMode = .disable
     ) async throws -> MySQLConnection {
-        let account = user
-            ?? server.primaryUser
-        return try await MySQLConnection.connect(
-            configuration: MySQLConnectionConfiguration(
-                address: .hostname(TestServers.host, port: server.port),
-                username: account.name,
-                password: account.password,
-                database: TestServers.database,
-                tls: tls,
-                serverPublicKey: .requestFromServer
-            ),
+        try await MySQLConnection.connect(
+            configuration: TestServers.configuration(for: server, as: user, tls: tls),
             on: TestServers.group.next()
         )
     }

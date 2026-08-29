@@ -18,13 +18,7 @@ struct ParityOptionsTests {
         matchedRows: Bool = false,
         setup: [String] = []
     ) async throws -> MySQLConnection {
-        let user = server.primaryUser
-        var config = MySQLConnectionConfiguration(
-            address: .hostname(TestServers.host, port: server.port),
-            username: user.name, password: user.password,
-            database: TestServers.database, tls: .disable,
-            serverPublicKey: .requestFromServer
-        )
+        var config = TestServers.configuration(for: server)
         config.reportsMatchedRows = matchedRows
         config.setupStatements = setup
         return try await MySQLConnection.connect(

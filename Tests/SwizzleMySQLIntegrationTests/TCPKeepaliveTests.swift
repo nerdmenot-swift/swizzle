@@ -22,13 +22,7 @@ struct TCPKeepaliveTests {
     static func connect(
         _ keepalive: TCPKeepalive, _ server: MySQLTestServer = TestServers.mariadb114
     ) async throws -> MySQLConnection {
-        let user = server.primaryUser
-        var configuration = MySQLConnectionConfiguration(
-            address: .hostname(TestServers.host, port: server.port),
-            username: user.name, password: user.password,
-            database: TestServers.database, tls: .disable,
-            serverPublicKey: .requestFromServer
-        )
+        var configuration = TestServers.configuration(for: server)
         configuration.tcpKeepalive = keepalive
         return try await MySQLConnection.connect(
             configuration: configuration, on: TestServers.group.next()

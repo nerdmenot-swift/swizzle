@@ -32,13 +32,7 @@ import Glibc
 struct BenchmarkTests {
 
     static func connect(_ server: MySQLTestServer) async throws -> MySQLConnection {
-        let user = server.primaryUser
-        var config = MySQLConnectionConfiguration(
-            address: .hostname(TestServers.host, port: server.port),
-            username: user.name, password: user.password,
-            database: TestServers.database, tls: .disable,
-            serverPublicKey: .requestFromServer
-        )
+        var config = TestServers.configuration(for: server)
         config.maxAllowedPacket = 64 * 1024 * 1024
         return try await MySQLConnection.connect(
             configuration: config, on: TestServers.group.next()

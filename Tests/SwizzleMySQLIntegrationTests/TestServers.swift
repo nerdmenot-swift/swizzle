@@ -306,15 +306,36 @@ public enum TestServers {
     /// so far**: that is where the CI failure was seen, and a bulk rewrite of the
     /// other fifteen went wrong badly enough to be reverted, so they are being
     /// moved over deliberately rather than by a script.
-    public static func configuration(for server: MySQLTestServer) -> MySQLConnectionConfiguration {
-        let user = server.primaryUser
+    public static func configuration(
+        for server: MySQLTestServer,
+        as user: MySQLTestServer.TestUser? = nil,
+        tls: MySQLConnectionConfiguration.TLSMode = .disable,
+        serverPublicKey: MySQLConnectionConfiguration.ServerPublicKey = .requestFromServer
+    ) -> MySQLConnectionConfiguration {
+        let account = user ?? server.primaryUser
         var configuration = MySQLConnectionConfiguration(
             address: .hostname(host, port: server.port),
-            username: user.name,
-            password: user.password,
+            username: account.name,
+            password: account.password,
             database: database,
-            tls: .disable,
-            serverPublicKey: .requestFromServer
+            tls: tls,
+            // Without this the suite is flaky against MySQL 9, and only
+            // sometimes. `caching_sha2_password` needs the RSA exchange on a
+            // **cache miss** and not otherwise, so a plaintext connection
+            // authenticates fine while the server happens to hold the password
+            // and is refused — correctly — when it does not. Which of those a
+            // test sees depends on what ran before it.
+            //
+            // The refusal is right: the server would send a public key over a
+            // plaintext connection for an attacker in the path to substitute.
+            // These fixtures are loopback-only, so accepting it explicitly is
+            // the deliberate choice.
+            //
+            // This reasoning was written out twice, in `ExecutorTests` and
+            // `MySQLAnalyzerTests`, and silently relied upon by nine other
+            // suites that set the same flag with no explanation. It belongs
+            // here, once, with the flag it justifies.
+            serverPublicKey: serverPublicKey
         )
         configuration.connectTimeout = connectTimeout
         return configuration

@@ -20,14 +20,7 @@ struct ConnectionTests {
         user: MySQLTestServer.TestUser,
         tls: MySQLConnectionConfiguration.TLSMode
     ) -> MySQLConnectionConfiguration {
-        MySQLConnectionConfiguration(
-            address: .hostname(TestServers.host, port: server.port),
-            username: user.name,
-            password: user.password,
-            database: TestServers.database,
-            tls: tls,
-            serverPublicKey: .requestFromServer
-        )
+        TestServers.configuration(for: server, as: user, tls: tls)
     }
 
     /// The native-password pairs, used by the general connection tests.
@@ -260,13 +253,8 @@ struct MySQLAuthenticationTests {
         tls: MySQLConnectionConfiguration.TLSMode,
         serverPublicKey: MySQLConnectionConfiguration.ServerPublicKey = .refuse
     ) -> MySQLConnectionConfiguration {
-        MySQLConnectionConfiguration(
-            address: .hostname(TestServers.host, port: server.port),
-            username: user.name,
-            password: user.password,
-            database: TestServers.database,
-            tls: tls,
-            serverPublicKey: serverPublicKey
+        TestServers.configuration(
+            for: server, as: user, tls: tls, serverPublicKey: serverPublicKey
         )
     }
 

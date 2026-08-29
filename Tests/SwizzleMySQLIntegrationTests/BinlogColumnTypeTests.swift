@@ -118,16 +118,7 @@ struct BinlogColumnTypeTests {
     /// under test. Without it, over-reading the last column would go unnoticed;
     /// with it, the sentinel decodes wrong and the test fails.
     static func connect() async throws -> MySQLConnection {
-        let server = TestServers.latest
-        let user = server.primaryUser
-        return try await MySQLConnection.connect(
-            configuration: .init(
-                address: .hostname(TestServers.host, port: server.port),
-                username: user.name, password: user.password,
-                database: TestServers.database, tls: .disable
-            ),
-            on: TestServers.group.next()
-        )
+        try await TestServers.connect(TestServers.latest)
     }
 
     /// Runs the whole matrix in a single pass over one binlog stream.
