@@ -224,4 +224,24 @@ struct PostgresUserTypeTests {
         _ = try await connection.queryResolvingTypes("SELECT 1::int8, 'x'::text, now()")
         #expect(connection.typeRegistry.count == 0)
     }
+
+    /// End to end against the server, because the unit test asserts our
+    /// rendering agrees with itself and this asserts it agrees with Postgres.
+    ///
+    /// The driver printed `(,x)` for both `ROW(NULL,'x')` and `ROW('','x')`,
+    /// where the server distinguishes them. Found by a mutation survivor that
+    /// pointed at the `length < 0` null marker: writing a test to separate the
+    /// two cases failed on unmutated code, which is the good kind of surprise.
+    @Test("a composite distinguishes a null field from an empty one")
+    func compositeNullVersusEmpty() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        let rows = try await connection.query(
+            "SELECT ROW(NULL::text, 'x')::text, ROW(''::text, 'x')::text"
+        )
+        #expect(rows.rows.first?.first == .text("(,x)"))
+        #expect(rows.rows.first?.last == .text("(\"\",x)"))
+    }
+
 }

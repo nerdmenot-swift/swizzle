@@ -227,4 +227,106 @@ struct ArrayDecodingTests {
         #expect(row.array(at: 0) != nil)
         #expect(row.array(named: "missing") == nil)
     }
+
+    // MARK: - Malformed text
+
+    /// The text scanner had no malformed-input coverage at all, and the mutation
+    /// sweep found ten survivors in it — every one an `index < characters.count`
+    /// bounds check.
+    ///
+    /// `malformed()` above is binary-only. Every text test feeds a well-formed
+    /// array, and a well-formed array never reaches a bounds check by definition:
+    /// the guards exist for input that stops early, and only a truncated or
+    /// hostile value gets there.
+    ///
+    /// This matters more than the equivalent binary gap because the text path is
+    /// a **hand-written recursive character scanner**. A missed bound is an
+    /// out-of-range crash or a loop that does not terminate, on a value the
+    /// server composed — and `decodeText` is reached for any array type whose
+    /// binary decoder the driver does not have.
+    ///
+    /// The truncation sweep is the load-bearing test here rather than the
+    /// individual cases: **no prefix of a valid array may crash or hang**, which
+    /// is a property no single hand-picked input states.
+    @Test("no prefix of a valid array crashes or hangs the scanner")
+    func everyTruncationIsSafe() {
+        let valid = #"{{"a,b",NULL,"c\"d"},{x,"",z}}"#
+        let characters = Array(valid.utf8)
+        for length in 0...characters.count {
+            // The result may be a value or nil; what it may not do is trap or
+            // fail to return.
+            _ = PostgresArrayDecoder.decodeText(
+                Array(characters.prefix(length)), elementOID: 25
+            )
+        }
+    }
+
+    /// The same for the explicit lower-bound prefix, which is a second scanner
+    /// ahead of the first: `[3:5]={a,b,c}`.
+    @Test("no prefix of a bounds-prefixed array crashes the scanner")
+    func everyTruncationOfBoundsPrefixIsSafe() {
+        let characters = Array("[3:5]={a,b,c}".utf8)
+        for length in 0...characters.count {
+            _ = PostgresArrayDecoder.decodeText(
+                Array(characters.prefix(length)), elementOID: 25
+            )
+        }
+    }
+
+    /// A quote that never closes — the scanner runs to the end looking for its
+    /// partner and must report failure rather than read past it.
+    @Test("an unterminated quoted element is refused")
+    func unterminatedQuote() {
+        #expect(PostgresArrayDecoder.decodeText(Array(#"{"abc"#.utf8), elementOID: 25) == nil)
+    }
+
+    /// A backslash as the final character, where the escape consumes the byte
+    /// that is not there. Both the quoted and unquoted branches have this, and
+    /// each had its own survivor.
+    @Test("a trailing escape is refused in both quoted and unquoted elements")
+    func trailingEscape() {
+        #expect(PostgresArrayDecoder.decodeText(Array(#"{"a\"#.utf8), elementOID: 25) == nil)
+        #expect(PostgresArrayDecoder.decodeText(Array(#"{a\"#.utf8), elementOID: 25) == nil)
+    }
+
+    /// Braces that never close, at the outer level and nested.
+    @Test("unclosed braces are refused")
+    func unclosedBraces() {
+        #expect(PostgresArrayDecoder.decodeText(Array("{".utf8), elementOID: 25) == nil)
+        #expect(PostgresArrayDecoder.decodeText(Array("{a,b".utf8), elementOID: 25) == nil)
+        #expect(PostgresArrayDecoder.decodeText(Array("{{1,2}".utf8), elementOID: 25) == nil)
+        #expect(PostgresArrayDecoder.decodeText(Array("{{1,2},{3,4}".utf8), elementOID: 25) == nil)
+    }
+
+    /// A separator where a value should be, and a value where a separator should
+    /// be — the two ways the element loop can be handed something it cannot use.
+    @Test("a malformed separator is refused rather than skipped")
+    func malformedSeparators() {
+        #expect(PostgresArrayDecoder.decodeText(Array(#"{"a" "b"}"#.utf8), elementOID: 25) == nil)
+        #expect(PostgresArrayDecoder.decodeText(Array("".utf8), elementOID: 25) == nil)
+        #expect(PostgresArrayDecoder.decodeText(Array("not an array".utf8), elementOID: 25) == nil)
+    }
+
+    // MARK: - Malformed binary
+
+    /// The binary header declares how many dimensions follow. Six is the server's
+    /// own limit, and the guard is `<=` — so six must be accepted and seven
+    /// refused, which is the boundary the mutant moves.
+    @Test("the dimension limit admits six and refuses seven")
+    func dimensionLimit() {
+        func header(dimensions: Int) -> [UInt8] {
+            var bytes: [UInt8] = []
+            bytes += withUnsafeBytes(of: Int32(dimensions).bigEndian) { Array($0) }
+            bytes += withUnsafeBytes(of: Int32(0).bigEndian) { Array($0) }      // flags
+            bytes += withUnsafeBytes(of: UInt32(25).bigEndian) { Array($0) }    // element OID
+            for _ in 0..<dimensions {
+                bytes += withUnsafeBytes(of: Int32(0).bigEndian) { Array($0) }  // length
+                bytes += withUnsafeBytes(of: Int32(1).bigEndian) { Array($0) }  // lower bound
+            }
+            return bytes
+        }
+        #expect(PostgresArrayDecoder.decodeBinary(header(dimensions: 6)) != nil)
+        #expect(PostgresArrayDecoder.decodeBinary(header(dimensions: 7)) == nil)
+    }
+
 }

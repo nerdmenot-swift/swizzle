@@ -1,3 +1,4 @@
+import NIOCore
 import Testing
 @testable import SwizzlePostgresDriver
 
@@ -100,6 +101,131 @@ struct ConnectionMetadataTests {
     func mixedProjection() {
         let oids = [PostgresOID.int8.rawValue, 99_999, PostgresOID.text.rawValue]
         #expect(PostgresConnection.unresolvedOIDs(oids, known: { _ in false }) == [99_999])
+    }
+
+
+    // MARK: - Composite decoding
+
+    /// A composite's binary form is a field count, then each field as its own OID
+    /// and a length-prefixed value. The sweep found every bound in it unguarded,
+    /// because composites are only ever tested by round-tripping one through a
+    /// real server.
+    ///
+    /// `decodeComposite` is reachable for any user-defined composite type, and a
+    /// length taken from the wire is the classic place to read past a buffer. The
+    /// `length < 0` branch is not an error path either — **negative means SQL
+    /// NULL** here, which is the same convention the row decoder uses, so
+    /// inverting it turns every null field into a failed decode and every real
+    /// field into an empty one.
+    @Test("a composite with no fields decodes to the empty tuple")
+    func emptyComposite() {
+        let registry = PostgresTypeRegistry()
+        var buffer = ByteBuffer(bytes: Self.int32(0))
+        #expect(registry.decodeComposite(&buffer) == .text("()"))
+    }
+
+    /// A negative count is not a field count.
+    @Test("a composite with a negative field count is refused")
+    func negativeCompositeCount() {
+        let registry = PostgresTypeRegistry()
+        var buffer = ByteBuffer(bytes: Self.int32(-1))
+        #expect(registry.decodeComposite(&buffer) == nil)
+    }
+
+    /// `-1` as a field length is SQL NULL, which renders as nothing between the
+    /// commas — `(1,,3)` — exactly as Postgres prints it.
+    @Test("a null field renders as an empty slot, not a failure")
+    func nullFieldInComposite() {
+        let registry = PostgresTypeRegistry()
+        var bytes = Self.int32(2)
+        bytes += Self.uint32(23)             // int4
+        bytes += Self.int32(-1)              // NULL
+        bytes += Self.uint32(23)
+        bytes += Self.int32(4)
+        bytes += Self.int32(7)
+        var buffer = ByteBuffer(bytes: bytes)
+        #expect(registry.decodeComposite(&buffer) == .text("(,7)"))
+    }
+
+    /// A field that claims more bytes than the buffer holds must fail rather
+    /// than read past it.
+    @Test("a field longer than the buffer is refused")
+    func truncatedCompositeField() {
+        let registry = PostgresTypeRegistry()
+        var bytes = Self.int32(1)
+        bytes += Self.uint32(23)
+        bytes += Self.int32(64)              // claims 64 bytes
+        bytes += [0x01]                      // supplies one
+        var buffer = ByteBuffer(bytes: bytes)
+        #expect(registry.decodeComposite(&buffer) == nil)
+    }
+
+    /// A count that promises more fields than the buffer describes.
+    @Test("a composite claiming more fields than it carries is refused")
+    func compositeWithMissingFields() {
+        let registry = PostgresTypeRegistry()
+        var bytes = Self.int32(3)
+        bytes += Self.uint32(23)
+        bytes += Self.int32(4)
+        bytes += Self.int32(1)
+        var buffer = ByteBuffer(bytes: bytes)
+        #expect(registry.decodeComposite(&buffer) == nil)
+    }
+
+    /// Every truncation of a valid composite, for the same reason the array
+    /// scanner gets one: no prefix may crash.
+    @Test("no prefix of a valid composite crashes the decoder")
+    func everyCompositeTruncationIsSafe() {
+        var bytes = Self.int32(2)
+        bytes += Self.uint32(23); bytes += Self.int32(4); bytes += Self.int32(1)
+        bytes += Self.uint32(25); bytes += Self.int32(3); bytes += Array("abc".utf8)
+
+        let registry = PostgresTypeRegistry()
+        for length in 0...bytes.count {
+            var buffer = ByteBuffer(bytes: Array(bytes.prefix(length)))
+            _ = registry.decodeComposite(&buffer)
+        }
+    }
+
+    static func int32(_ value: Int32) -> [UInt8] {
+        withUnsafeBytes(of: value.bigEndian) { Array($0) }
+    }
+
+    static func uint32(_ value: UInt32) -> [UInt8] {
+        withUnsafeBytes(of: value.bigEndian) { Array($0) }
+    }
+
+
+    /// An **empty** field is not a null field, and the two must not render the
+    /// same. `-1` is SQL NULL; `0` is a value that happens to have no bytes.
+    ///
+    /// The null test above does not separate them — both comparisons treat a
+    /// negative length as null, so the mutant relaxing `length < 0` to `<= 0`
+    /// lived through it. Postgres prints the difference, `(,x)` against `("",x)`,
+    /// and a client that collapses them loses the distinction between "this
+    /// field has no value" and "this field is the empty string".
+    @Test("an empty field is distinct from a null field")
+    func emptyFieldIsNotNull() {
+        let registry = PostgresTypeRegistry()
+
+        var withNull = Self.int32(1)
+        withNull += Self.uint32(25)
+        withNull += Self.int32(-1)
+        var nullBuffer = ByteBuffer(bytes: withNull)
+        let nullRendering = registry.decodeComposite(&nullBuffer)
+
+        var withEmpty = Self.int32(1)
+        withEmpty += Self.uint32(25)
+        withEmpty += Self.int32(0)
+        var emptyBuffer = ByteBuffer(bytes: withEmpty)
+        let emptyRendering = registry.decodeComposite(&emptyBuffer)
+
+        #expect(nullRendering != nil)
+        #expect(emptyRendering != nil)
+        #expect(
+            nullRendering != emptyRendering,
+            "a null and an empty field both rendered as \(nullRendering as Any)"
+        )
     }
 
 }

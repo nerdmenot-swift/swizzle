@@ -302,7 +302,24 @@ public final class PostgresTypeRegistry: Sendable {
 /// is the bare word.
 enum PostgresCompositeLiteral {
     static func quote(_ text: String) -> String {
-        guard !text.isEmpty else { return "" }
+        // An empty *value* renders as a pair of quotes, not as nothing.
+        //
+        // This returned "" and so collapsed two different things into one output:
+        // Postgres prints `ROW(NULL,'x')` as `(,x)` and `ROW('','x')` as
+        // `("",x)`, and this driver printed `(,x)` for both. A caller reading the
+        // rendered composite could not tell a field that has no value from one
+        // whose value is the empty string — and for a text field that is a
+        // distinction applications make.
+        //
+        // Confirmed against the server rather than from memory:
+        //
+        //     SELECT ROW(NULL::text,'x')::text, ROW(''::text,'x')::text
+        //     → (,x) | ("",x)
+        //
+        // The null case never reaches here: `decodeComposite` appends an empty
+        // string to `parts` directly for a negative length, which is what
+        // produces the bare comma.
+        guard !text.isEmpty else { return "\"\"" }
         let needsQuotes = text.contains { "(),\"\\ \t\n\r".contains($0) }
         guard needsQuotes else { return text }
         let escaped = text

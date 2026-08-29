@@ -198,6 +198,12 @@ public enum PostgresArrayDecoder {
                     raw.append(characters[index])
                     index += 1
                 }
+                // Redundant with the caller's own bounds check, and deliberately
+                // kept. The mutation sweep relaxes this to `<=` and nothing can
+                // catch it: letting `index` reach `count + 1` here just makes
+                // `parse` return false on its next guard, so the array still
+                // decodes to nil by a slightly longer route. Removing it would
+                // rely on that second check never moving.
                 guard index < characters.count else { return nil }
                 index += 1  // closing quote
             } else {
