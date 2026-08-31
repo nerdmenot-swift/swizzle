@@ -57,8 +57,21 @@ public struct PostgresRow: Sendable, Equatable {
             && (lhs.schema === rhs.schema || lhs.columns == rhs.columns)
     }
 
+    /// Out of range reads as `.null` rather than trapping, **including a
+    /// negative index**.
+    ///
+    /// This was `index < values.count`, which is true for every negative number,
+    /// so `row[-1]` reached `values[-1]` and crashed. That is a public subscript
+    /// on a public type: any caller computing an index — a loop counter, a
+    /// `firstIndex(of:)` that returned nothing and was defaulted to -1 — took the
+    /// process down with it.
+    ///
+    /// Returning `.null` for a column that is not there is the same answer this
+    /// gives for one past the end, and it is the right one: a row is a positional
+    /// view over what the server sent, and asking for a position it does not have
+    /// is a question with an answer, not a programming error worth trapping on.
     public subscript(index: Int) -> SQLValue {
-        index < values.count ? values[index] : .null
+        index >= 0 && index < values.count ? values[index] : .null
     }
 
     /// Lookup by name. Nil means *there is no such column*, which is a different
@@ -75,7 +88,12 @@ public struct PostgresRow: Sendable, Equatable {
     /// would put a type only Postgres can produce into the vocabulary all three
     /// engines share. Callers that want elements ask for them.
     public func array(at index: Int) -> PostgresArray? {
-        guard index < schema.count else { return nil }
+        // Both bounds, and both arrays. This guarded `schema.count` and then
+        // indexed `values`, which are not the same length when a row is narrower
+        // than the description it arrived with — a shape the query state machine
+        // genuinely produces. `row.array(at: 2)` on a three-column description
+        // carrying one value crashed.
+        guard index >= 0, index < schema.count, index < values.count else { return nil }
         let column = schema.columns[index]
         guard PostgresOID(rawValue: column.dataTypeOID)?.elementType != nil else { return nil }
         switch values[index] {
