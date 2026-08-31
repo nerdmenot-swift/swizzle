@@ -228,4 +228,57 @@ struct ConnectionMetadataTests {
         )
     }
 
+
+    // MARK: - PostgresUserType equality
+
+    /// `PostgresUserType` has a hand-written `==` over eight properties, and the
+    /// sweep found every clause unguarded: drop any one and two genuinely
+    /// different types compare equal.
+    ///
+    /// It is hand-written because `fields` is an array of tuples, which Swift
+    /// will not synthesise conformance for — so the whole chain is manual and
+    /// every clause is a place a property can be forgotten when one is added.
+    /// That is exactly the failure a table like this catches: each case differs
+    /// from the baseline in **one** property, so a missing clause fails here and
+    /// nowhere else.
+    static let baseline = PostgresUserType(
+        oid: 1, name: "mytype", schema: "public", kind: .composite,
+        elementOID: 2, rangeSubtypeOID: 3, baseOID: 4,
+        labels: ["a", "b"], fields: [("x", 23), ("y", 25)]
+    )
+
+    @Test("a type equals itself and an identical copy")
+    func userTypeEquality() {
+        #expect(Self.baseline == Self.baseline)
+        var copy = Self.baseline
+        #expect(copy == Self.baseline)
+        copy.relationOID = 99
+        #expect(copy == Self.baseline, "relationOID is deliberately not compared")
+    }
+
+    @Test("differing in any single property makes two types unequal")
+    func userTypeInequality() {
+        var oid = Self.baseline; oid.oid = 2
+        var name = Self.baseline; name.name = "other"
+        var schema = Self.baseline; schema.schema = "other"
+        var kind = Self.baseline; kind.kind = .domain
+        var element = Self.baseline; element.elementOID = 99
+        var subtype = Self.baseline; subtype.rangeSubtypeOID = 99
+        var base = Self.baseline; base.baseOID = 99
+        var labels = Self.baseline; labels.labels = ["a", "c"]
+        var fieldNames = Self.baseline; fieldNames.fields = [("x", 23), ("z", 25)]
+        var fieldOIDs = Self.baseline; fieldOIDs.fields = [("x", 23), ("y", 1043)]
+        var fewerFields = Self.baseline; fewerFields.fields = [("x", 23)]
+        var fewerLabels = Self.baseline; fewerLabels.labels = ["a"]
+
+        for (label, other) in [
+            ("oid", oid), ("name", name), ("schema", schema), ("kind", kind),
+            ("elementOID", element), ("rangeSubtypeOID", subtype), ("baseOID", base),
+            ("labels", labels), ("field names", fieldNames), ("field OIDs", fieldOIDs),
+            ("fewer fields", fewerFields), ("fewer labels", fewerLabels),
+        ] {
+            #expect(other != Self.baseline, "\(label) should distinguish two types")
+        }
+    }
+
 }

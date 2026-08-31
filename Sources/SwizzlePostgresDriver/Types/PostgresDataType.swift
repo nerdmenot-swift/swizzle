@@ -474,6 +474,10 @@ public enum PostgresValueDecoder {
         // what makes `1.10` come back as `1.10` rather than `1.1`.
         var fractionText = ""
         var index = Int(weight) + 1
+        // The mutation sweep relaxes this to `<=` and nothing can catch it: the
+        // extra pass appends four more digits and the `prefix(displayScale)`
+        // below discards them, so no input distinguishes the two. Recorded rather
+        // than chased — the bound that is actually load-bearing is the truncation.
         while fractionText.count < Int(displayScale) {
             let group = index >= 0 && index < groups.count ? groups[index] : 0
             fractionText += String(format: "%04d", group)
