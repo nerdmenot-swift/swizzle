@@ -461,4 +461,48 @@ struct PostgresExtendedTypeTests {
         }
     }
 
+
+    // MARK: - money and pg_lsn
+
+    /// `money` is an `Int64` of hundredths, and its rendering is the two-digit
+    /// fraction and the sign. Not in the table above, so its decoder had
+    /// unguarded comparisons — including the one that decides where the minus
+    /// goes, which for a value between -1 and 0 is the difference between
+    /// `-0.50` and `0.-50`.
+    ///
+    /// The **locale caveat**: `money`'s text form carries a currency symbol and
+    /// separators from `lc_monetary`, while the binary form is a bare number. So
+    /// these compare the driver against a literal rather than against `::text`,
+    /// which is the one type in this file where the two genuinely differ by
+    /// design.
+    @Test("money renders its sign and hundredths")
+    func moneyRendering() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        for (literal, expected) in [
+            ("0.00", "0.00"), ("1.00", "1.00"), ("1.05", "1.05"), ("1.50", "1.50"),
+            ("-1.05", "-1.05"), ("-0.50", "-0.50"), ("0.01", "0.01"), ("-0.01", "-0.01"),
+            ("12345.67", "12345.67"), ("-12345.67", "-12345.67"),
+        ] {
+            let rows = try await connection.query("SELECT $1::money", [.text(literal)]).rows
+            #expect(rows.first?[0] == .text(expected), "money '\(literal)'")
+        }
+    }
+
+    /// `pg_lsn` is two `UInt32`s printed `XXXXXXXX/XXXXXXXX`, which is the only
+    /// spelling any Postgres tool accepts — so binary and text must agree
+    /// exactly, including the zero padding.
+    @Test("pg_lsn agrees between binary and text")
+    func lsnAgrees() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        for literal in [
+            "0/0", "0/1", "1/0", "16/B374D848", "FFFFFFFF/FFFFFFFF", "0/FFFFFFFF",
+        ] {
+            try await check(connection, literal, "pg_lsn")
+        }
+    }
+
 }
