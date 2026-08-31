@@ -47,6 +47,24 @@ FILTER="${2:-}"
 #
 # `git worktree` rather than `cp -r`: it gives a clean checkout of HEAD with no
 # `.build` to copy, and removing it cannot touch the original.
+# **The fixtures are shared, so nothing else may run tests while this does.**
+#
+# The arena is a private checkout, but it talks to the *same* database servers as
+# everything else — the `.testservers` symlink below is what makes the
+# integration suites reachable at all. Two suites against one server fight over
+# fixed-name tables and fail with 1050 "table already exists" and 1146 "table
+# doesn't exist".
+#
+# That is not hypothetical: running `swift test` during a sweep produced 44
+# failures that looked exactly like a broken commit, and the tree was fine. If
+# you need to run the suite, pause the sweep first —
+#
+#     pkill -STOP -f mutation-sweep   # …run tests…
+#     pkill -CONT -f mutation-sweep
+#
+# Separate servers per sweep would fix it properly and cost a second full set of
+# fixtures; the pause is cheaper and this is not a thing anyone does often.
+
 # The arena is **per target**, so two sweeps can run at once.
 #
 # It was one shared path, so starting a MySQL sweep while a Postgres one was
@@ -127,6 +145,7 @@ SITES="$(dirname "${BASH_SOURCE[0]}")/mutation-sites.awk"
 total=0; survived=0; killed=0; uncompilable=0; hung=0
 
 echo "Mutation sweep over $TARGET"
+echo "  the fixtures are shared — do not run the suite while this runs" >&2
 [[ -n "$FILTER" ]] && echo "  test filter: $FILTER"
 echo
 
