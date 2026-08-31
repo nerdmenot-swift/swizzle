@@ -289,7 +289,14 @@ extension PostgresArray {
         case .null: return "NULL"
         case .bool(let flag): return flag ? "t" : "f"
         case .int(let number): return String(number)
-        case .double(let number): return String(number)
+        case .double(let number):
+            // Swift renders these as `nan`, `inf` and `-inf`; Postgres prints
+            // `NaN`, `Infinity` and `-Infinity`. Inside an array the difference
+            // is visible — `{1.5,nan}` against the server's `{1.5,NaN}` — and it
+            // is the array path that renders values as text at all.
+            if number.isNaN { return "NaN" }
+            if number.isInfinite { return number < 0 ? "-Infinity" : "Infinity" }
+            return String(number)
         case .text(let string): return string
         case .blob(let bytes):
             return "\\x" + String(decoding: PostgresValueEncoder.hexEncode(bytes), as: UTF8.self)

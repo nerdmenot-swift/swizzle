@@ -336,15 +336,37 @@ public enum PostgresValueDecoder {
             // `integer_datetimes` can tell the two apart — which is why it is
             // threaded in rather than assumed.
             guard let raw = buffer.readInteger(as: Int64.self) else { return .null }
-            let seconds = hasIntegerDatetimes
-                ? Double(raw) / 1_000_000
-                : Double(bitPattern: UInt64(bitPattern: raw))
-            return .text(formatTimestamp(postgresEpoch.addingTimeInterval(seconds)))
+            let microseconds = hasIntegerDatetimes
+                ? raw
+                : Int64(Double(bitPattern: UInt64(bitPattern: raw)) * 1_000_000)
+            let rendered = formatTimestamp(microsecondsSinceEpoch: microseconds)
+            // `timestamptz` carries the zone: the value is an absolute instant and
+            // the server prints it with an offset. This driver normalises to UTC,
+            // so the offset is always `+00` — but it has to be *there*, or the
+            // same column reads differently depending on whether the query had a
+            // parameter.
+            return .text(type == .timestamptz ? rendered + "+00" : rendered)
 
         case .date:
             guard let days = buffer.readInteger(as: Int32.self) else { return .null }
-            let date = postgresEpoch.addingTimeInterval(Double(days) * 86_400)
-            return .text(String(formatTimestamp(date).prefix(10)))
+            let civil = civilFromDays(Int(days) + 10_957)
+            return .text(String(format: "%04d-%02d-%02d", civil.year, civil.month, civil.day))
+
+        // `time` and `timetz` had **no case at all** and fell through to `.blob`,
+        // so a time column read over the extended protocol came back as eight raw
+        // bytes. Nothing caught it because the temporal suite compared the
+        // server's text rendering against itself.
+        case .time:
+            guard let raw = buffer.readInteger(as: Int64.self) else { return .null }
+            return .text(formatTimeOfDay(raw))
+
+        case .timetz:
+            // Microseconds since midnight, then the zone as seconds **west** of
+            // UTC — the opposite sign from how it prints.
+            guard let raw = buffer.readInteger(as: Int64.self),
+                  let zone = buffer.readInteger(as: Int32.self)
+            else { return .null }
+            return .text(formatTimeOfDay(raw) + formatZoneOffset(secondsWestOfUTC: zone))
 
         case .interval:
             return PostgresExtendedTypes.decodeInterval(&buffer) ?? .blob(bytes)
@@ -506,19 +528,87 @@ public enum PostgresValueDecoder {
 
     /// ISO-8601-ish, matching what the server would have sent in text format, so a
     /// value decodes the same whichever format it arrived in.
-    static func formatTimestamp(_ date: Date) -> String {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let parts = calendar.dateComponents(
-            [.year, .month, .day, .hour, .minute, .second, .nanosecond], from: date
-        )
-        let base = String(
-            format: "%04d-%02d-%02d %02d:%02d:%02d",
-            parts.year ?? 0, parts.month ?? 0, parts.day ?? 0,
-            parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0
-        )
-        let micros = (parts.nanosecond ?? 0) / 1000
-        return micros > 0 ? base + String(format: ".%06d", micros) : base
+    /// Civil date from a day count, in the **proleptic** Gregorian calendar.
+    ///
+    /// Foundation's `Calendar(identifier: .gregorian)` is not proleptic: it
+    /// applies the Julian calendar before 1582-10-15, so `0001-01-01` came back
+    /// as `0001-01-03` — two days out, silently, for any date before the
+    /// cutover. Postgres is proleptic throughout, which is why the oracle caught
+    /// it and nothing else had.
+    ///
+    /// Howard Hinnant's `civil_from_days`, which is the standard formulation and
+    /// exact for the whole range a 32-bit day count can express.
+    static func civilFromDays(_ days: Int) -> (year: Int, month: Int, day: Int) {
+        // Shift the epoch to 0000-03-01, which puts the leap day at the end of
+        // the year and makes the month arithmetic branch-free.
+        let z = days + 719_468
+        let era = (z >= 0 ? z : z - 146_096) / 146_097
+        let dayOfEra = z - era * 146_097
+        let yearOfEra =
+            (dayOfEra - dayOfEra / 1460 + dayOfEra / 36_524 - dayOfEra / 146_096) / 365
+        let year = yearOfEra + era * 400
+        let dayOfYear = dayOfEra - (365 * yearOfEra + yearOfEra / 4 - yearOfEra / 100)
+        let mp = (5 * dayOfYear + 2) / 153
+        let day = dayOfYear - (153 * mp + 2) / 5 + 1
+        let month = mp < 10 ? mp + 3 : mp - 9
+        return (month <= 2 ? year + 1 : year, month, day)
+    }
+
+    /// `HH:MM:SS` with the fraction only when there is one, which is how the
+    /// server prints it.
+    static func formatTimeOfDay(_ microseconds: Int64) -> String {
+        let total = microseconds < 0 ? 0 : microseconds
+        let hours = total / 3_600_000_000
+        let minutes = (total % 3_600_000_000) / 60_000_000
+        let seconds = (total % 60_000_000) / 1_000_000
+        let fraction = total % 1_000_000
+        let base = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+        guard fraction > 0 else { return base }
+        var digits = String(format: "%06d", fraction)
+        while digits.hasSuffix("0") { digits.removeLast() }
+        return base + "." + digits
+    }
+
+    /// A UTC offset as Postgres prints it: `+00`, `-05`, or `+05:30` when the
+    /// zone is not a whole hour.
+    ///
+    /// `timetz` carries seconds **west** of UTC, which is the opposite sign from
+    /// how it is displayed.
+    static func formatZoneOffset(secondsWestOfUTC: Int32) -> String {
+        let east = -Int(secondsWestOfUTC)
+        let sign = east < 0 ? "-" : "+"
+        let magnitude = abs(east)
+        let hours = magnitude / 3600
+        let minutes = (magnitude % 3600) / 60
+        let seconds = magnitude % 60
+        if seconds != 0 {
+            return String(format: "%@%02d:%02d:%02d", sign, hours, minutes, seconds)
+        }
+        if minutes != 0 { return String(format: "%@%02d:%02d", sign, hours, minutes) }
+        return String(format: "%@%02d", sign, hours)
+    }
+
+    /// Renders an instant the way Postgres prints a `timestamp`.
+    ///
+    /// Built from the integer microseconds rather than a `Date` and a `Calendar`,
+    /// because Foundation's Gregorian calendar is not proleptic and was two days
+    /// out for anything before 1582. Splitting the count into days and a
+    /// time-of-day keeps the arithmetic exact and matches what the server does.
+    static func formatTimestamp(microsecondsSinceEpoch: Int64) -> String {
+        let dayMicroseconds: Int64 = 86_400_000_000
+        // Floor division, so a negative instant lands on the day before rather
+        // than truncating towards zero.
+        var days = microsecondsSinceEpoch / dayMicroseconds
+        var remainder = microsecondsSinceEpoch % dayMicroseconds
+        if remainder < 0 {
+            remainder += dayMicroseconds
+            days -= 1
+        }
+        // Days are counted from 2000-01-01, which is 10957 days after the Unix
+        // epoch that `civilFromDays` is written against.
+        let civil = civilFromDays(Int(days) + 10_957)
+        return String(format: "%04d-%02d-%02d ", civil.year, civil.month, civil.day)
+            + formatTimeOfDay(remainder)
     }
 
     static func hexBytes(_ text: some StringProtocol) -> [UInt8] {
