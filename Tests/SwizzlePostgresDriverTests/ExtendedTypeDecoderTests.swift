@@ -206,4 +206,75 @@ struct ExtendedTypeDecoderTests {
         #expect(value != nil, "an empty bound must decode rather than fail")
     }
 
+
+    // MARK: - Intervals
+
+    /// Interval rendering, checked against the values Postgres itself prints.
+    ///
+    /// The pluralisation rule is `value == 1`, not `abs(value) == 1`: the server
+    /// prints `-1 years`, `-1 mons` and `-1 days`, and only a *positive* one is
+    /// singular. Taking the magnitude first rendered `-1 year`, which no server
+    /// ever prints — a real discrepancy, found because the mutation sweep flagged
+    /// the comparison and checking it meant asking the server what it does.
+    ///
+    /// These are the literals `psql` shows for the same values, captured from a
+    /// live 16.15 rather than written from memory.
+    static func interval(months: Int32, days: Int32, microseconds: Int64) -> SQLValue? {
+        var bytes: [UInt8] = []
+        bytes += withUnsafeBytes(of: microseconds.bigEndian) { Array($0) }
+        bytes += withUnsafeBytes(of: days.bigEndian) { Array($0) }
+        bytes += withUnsafeBytes(of: months.bigEndian) { Array($0) }
+        var buffer = Self.buffer(bytes)
+        return PostgresExtendedTypes.decodeInterval(&buffer)
+    }
+
+    @Test("a positive singular unit is singular")
+    func intervalSingular() {
+        #expect(Self.interval(months: 12, days: 0, microseconds: 0) == .text("1 year"))
+        #expect(Self.interval(months: 1, days: 0, microseconds: 0) == .text("1 mon"))
+        #expect(Self.interval(months: 0, days: 1, microseconds: 0) == .text("1 day"))
+    }
+
+    /// The case the magnitude hid.
+    @Test("a negative singular unit is plural, as the server prints it")
+    func intervalNegativeSingularIsPlural() {
+        #expect(Self.interval(months: -12, days: 0, microseconds: 0) == .text("-1 years"))
+        #expect(Self.interval(months: -1, days: 0, microseconds: 0) == .text("-1 mons"))
+        #expect(Self.interval(months: 0, days: -1, microseconds: 0) == .text("-1 days"))
+        #expect(
+            Self.interval(months: -13, days: -1, microseconds: 0)
+                == .text("-1 years -1 mons -1 days")
+        )
+    }
+
+    @Test("plural units keep their s")
+    func intervalPlural() {
+        #expect(Self.interval(months: 24, days: 0, microseconds: 0) == .text("2 years"))
+        #expect(Self.interval(months: 0, days: 3, microseconds: 0) == .text("3 days"))
+    }
+
+    /// A zero interval is `00:00:00`, not nothing at all.
+    @Test("a zero interval renders as a zero time")
+    func intervalZero() {
+        #expect(Self.interval(months: 0, days: 0, microseconds: 0) == .text("00:00:00"))
+    }
+
+    /// The time component, including the fraction whose trailing zeros are
+    /// trimmed exactly as the server trims them.
+    @Test("the time component renders with a trimmed fraction")
+    func intervalTime() {
+        #expect(
+            Self.interval(months: 14, days: 3, microseconds: 14_706_789_000)
+                == .text("1 year 2 mons 3 days 04:05:06.789")
+        )
+        // A whole number of seconds carries no decimal point at all.
+        #expect(Self.interval(months: 0, days: 0, microseconds: 1_000_000) == .text("00:00:01"))
+        // And a negative time is signed once, on the clock rather than each field.
+        #expect(Self.interval(months: 0, days: 0, microseconds: -1_500_000) == .text("-00:00:01.5"))
+        #expect(
+            Self.interval(months: 0, days: -1, microseconds: -7_200_000_000)
+                == .text("-1 days -02:00:00")
+        )
+    }
+
 }

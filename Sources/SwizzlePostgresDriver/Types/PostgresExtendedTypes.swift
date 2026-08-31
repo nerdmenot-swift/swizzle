@@ -483,12 +483,17 @@ extension PostgresExtendedTypes {
                 .replacingOccurrences(of: "'", with: "''") + "'"
             if weight != 0 || isPrefix {
                 text += ":"
+                // **The prefix marker comes first.** Postgres prints
+                // `'cat':*A` and `'cat':*AB`, not `'cat':A*` — confirmed
+                // against the server rather than inferred from the wire
+                // order, which puts the weight byte first and is what
+                // this followed.
+                if isPrefix { text += "*" }
                 // A is the high bit and D the low one.
                 if weight & 0b1000 != 0 { text += "A" }
                 if weight & 0b0100 != 0 { text += "B" }
                 if weight & 0b0010 != 0 { text += "C" }
                 if weight & 0b0001 != 0 { text += "D" }
-                if isPrefix { text += "*" }
             }
             return text
 
@@ -502,7 +507,8 @@ extension PostgresExtendedTypes {
                     items, &index, parentPriority: priority, isRightPhrase: false
                 ) else { return nil }
                 let text = "!" + operand
-                return priority < parentPriority ? "(" + text + ")" : text
+                // `( … )` with spaces, as the server prints it — see below.
+                return priority < parentPriority ? "( " + text + " )" : text
             }
 
             // **Right operand first.** The wire order is operator, right subtree,
@@ -525,7 +531,20 @@ extension PostgresExtendedTypes {
             let text = left + symbol + right
             let needsParentheses = priority < parentPriority
                 || (priority == parentPriority && isRightPhrase)
-            return needsParentheses ? "(" + text + ")" : text
+            // **Spaces inside the parentheses**, because that is what Postgres
+            // prints: `( 'cat' | 'rat' ) & 'dog'`, not `('cat' | 'rat') & 'dog'`.
+            //
+            // Without them a `tsquery` column read over the extended protocol did
+            // not match the same column read over the simple one — the exact
+            // inconsistency this file exists to prevent, since everything here
+            // renders what the server renders so a value reads identically
+            // whichever format it arrived in.
+            //
+            // Hidden because the suite checking this ran `SELECT expr::text, expr`
+            // with no bindings, which takes the simple protocol and returns *both*
+            // columns as text: it compared the server's rendering against the
+            // server's rendering and could not fail.
+            return needsParentheses ? "( " + text + " )" : text
         }
     }
 }
@@ -547,11 +566,19 @@ extension PostgresExtendedTypes {
         var parts: [String] = []
         let years = months / 12
         let remainingMonths = months % 12
-        if years != 0 { parts.append("\(years) year\(abs(years) == 1 ? "" : "s")") }
+        // `value == 1`, not `abs(value) == 1`. Postgres pluralises a negative
+        // singular — it prints `-1 years`, `-1 mons` and `-1 days`, and only a
+        // *positive* one is singular:
+        //
+        //     SELECT interval '-1 year'::text, interval '1 year'::text
+        //     → -1 years | 1 year
+        //
+        // Taking the magnitude first rendered `-1 year`, which no server prints.
+        if years != 0 { parts.append("\(years) year\(years == 1 ? "" : "s")") }
         if remainingMonths != 0 {
-            parts.append("\(remainingMonths) mon\(abs(remainingMonths) == 1 ? "" : "s")")
+            parts.append("\(remainingMonths) mon\(remainingMonths == 1 ? "" : "s")")
         }
-        if days != 0 { parts.append("\(days) day\(abs(days) == 1 ? "" : "s")") }
+        if days != 0 { parts.append("\(days) day\(days == 1 ? "" : "s")") }
 
         if microseconds != 0 {
             let negative = microseconds < 0

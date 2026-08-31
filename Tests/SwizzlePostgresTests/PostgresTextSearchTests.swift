@@ -234,4 +234,69 @@ struct PostgresTextSearchTests {
         ).rows
         #expect(rows[0][0] == .text(""))
     }
+
+    /// Proof that `agree` above was tautological for the binary path, kept as a
+    /// test because the property it asserts is the one that matters.
+    ///
+    /// `connection.query(sql)` with no bindings uses the **simple** protocol,
+    /// which returns every value in *text* format. So `SELECT expr::text, expr`
+    /// compared the server's rendering against the server's rendering: the
+    /// binary decoder never ran, and could not fail. Thirteen mutation survivors
+    /// in the `tsquery` renderer said so before anyone noticed.
+    ///
+    /// Passing a binding forces the extended protocol, which asks for binary
+    /// results — so this runs the decoder those tests were written for.
+    func agreeInBinary(
+        _ connection: PostgresConnection, _ expression: String,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws {
+        // The binding is unused by the projection; it is there to make the
+        // driver take the extended path.
+        let rows = try await connection.query(
+            "SELECT (\(expression))::text, \(expression) WHERE $1::bool", [.bool(true)]
+        ).rows
+        #expect(
+            rows.first?[0] == rows.first?[1],
+            "\(expression): server \(rows.first?[0] as Any), driver \(rows.first?[1] as Any)",
+            sourceLocation: sourceLocation
+        )
+    }
+
+    @Test("tsquery decodes from binary exactly as the server renders it")
+    func tsqueryInBinary() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        for expression in [
+            "cat", "cat & rat", "cat | rat", "!cat", "cat <-> rat", "cat <3> rat",
+            "cat & rat | dog", "cat | rat & dog",
+            "(cat | rat) & dog", "cat & (rat | dog)",
+            "cat <-> rat & dog", "cat & rat <-> dog",
+            "!cat & rat", "!(cat & rat)", "!cat | rat", "!(cat | rat)",
+            "cat <-> rat <-> dog", "cat <-> (rat <-> dog)", "(cat <-> rat) <-> dog",
+            "cat <2> (rat <3> dog)",
+            "(cat | rat) & (dog | fox)", "!(cat & (rat | !dog))",
+            "a & b & c & d", "a | b | c | d", "((a | b) & c) | d",
+            "cat:A", "cat:AB", "cat:*", "cat:*A", "cat:ABCD", "cat:A & rat:*B",
+            "'it''s'", "'a b'",
+        ] {
+            let escaped = expression.replacingOccurrences(of: "'", with: "''")
+            try await agreeInBinary(connection, "'\(escaped)'::tsquery")
+        }
+    }
+
+    @Test("tsvector decodes from binary exactly as the server renders it")
+    func tsvectorInBinary() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        for expression in [
+            "a fat cat", "a:1 fat:2 cat:3", "cat:1A", "cat:2B,3C", "cat:1A,2B,3C,4D",
+            "'it''s':1", "'a b':1", "cat", "", "cat:1 dog:2,3 fox:4A",
+        ] {
+            let escaped = expression.replacingOccurrences(of: "'", with: "''")
+            try await agreeInBinary(connection, "'\(escaped)'::tsvector")
+        }
+    }
+
 }
