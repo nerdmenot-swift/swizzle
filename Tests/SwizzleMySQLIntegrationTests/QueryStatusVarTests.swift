@@ -163,4 +163,62 @@ struct QueryStatusVarTests {
         let parsed = MySQLQueryStatusVariables.parse(&buffer)
         #expect(parsed.sqlMode == nil)
     }
+
+    // MARK: - Equality
+
+    /// `MySQLQueryStatusVariables` has a hand-written `==` over nine properties,
+    /// and the sweep found five of its clauses unguarded: drop any one and two
+    /// statements with genuinely different session state compare equal.
+    ///
+    /// It is hand-written because `autoIncrement` and `charset` are tuples, which
+    /// Swift will not synthesise conformance for — so the whole chain is manual,
+    /// and every clause is somewhere a property gets forgotten when one is added.
+    /// The block already has six fields and MySQL keeps adding status variables.
+    ///
+    /// Each case below differs from the baseline in exactly one property, so a
+    /// missing clause fails here and nowhere else.
+    static var baseline: MySQLQueryStatusVariables {
+        var value = MySQLQueryStatusVariables()
+        value.timeZone = "+00:00"
+        value.sqlMode = 0x1234
+        value.autoIncrement = (increment: 1, offset: 2)
+        value.charset = (client: 33, connection: 33, server: 45)
+        value.defaultCollationForUTF8MB4 = 255
+        value.updatedDatabases = ["app", "other"]
+        return value
+    }
+
+    @Test("identical status variables compare equal")
+    func statusVariablesEqual() {
+        #expect(Self.baseline == Self.baseline)
+    }
+
+    @Test("differing in any single field makes two status blocks unequal")
+    func statusVariablesInequality() {
+        var zone = Self.baseline; zone.timeZone = "+05:30"
+        var mode = Self.baseline; mode.sqlMode = 0x4321
+        var increment = Self.baseline; increment.autoIncrement = (increment: 9, offset: 2)
+        var offset = Self.baseline; offset.autoIncrement = (increment: 1, offset: 9)
+        var client = Self.baseline; client.charset = (client: 99, connection: 33, server: 45)
+        var connection = Self.baseline; connection.charset = (client: 33, connection: 99, server: 45)
+        var server = Self.baseline; server.charset = (client: 33, connection: 33, server: 99)
+        var collation = Self.baseline; collation.defaultCollationForUTF8MB4 = 1
+        var databases = Self.baseline; databases.updatedDatabases = ["app"]
+        var noZone = Self.baseline; noZone.timeZone = nil
+        var noAutoIncrement = Self.baseline; noAutoIncrement.autoIncrement = nil
+        var noCharset = Self.baseline; noCharset.charset = nil
+
+        for (label, other) in [
+            ("time zone", zone), ("sql mode", mode),
+            ("auto_increment_increment", increment), ("auto_increment_offset", offset),
+            ("charset client", client), ("charset connection", connection),
+            ("charset server", server), ("utf8mb4 collation", collation),
+            ("updated databases", databases),
+            ("absent time zone", noZone), ("absent auto increment", noAutoIncrement),
+            ("absent charset", noCharset),
+        ] {
+            #expect(other != Self.baseline, "\(label) should distinguish two blocks")
+        }
+    }
+
 }

@@ -235,4 +235,66 @@ struct ParsecTests {
             )
         }
     }
+
+    // MARK: - Parsing the server's challenge
+
+    /// The iteration factor's upper bound, which nothing was checking.
+    ///
+    /// `iterations` is `1024 << factor`, so the cap is what stops a hostile
+    /// server asking for an unbounded amount of PBKDF2 work — shifting by 200
+    /// is undefined-ish nonsense and shifting by 40 is a client that hangs
+    /// burning CPU on a login. The bound is documented as 3 and the guard is
+    /// `<= 3`; the sweep relaxed it to `< 3` and nothing failed, because every
+    /// test used the fixture's own factor.
+    ///
+    /// Both sides of the boundary, since narrowing it rejects a challenge the
+    /// server is entitled to send and widening it accepts one it is not.
+    @Test("the iteration factor is accepted up to three and refused above")
+    func iterationFactorBounds() throws {
+        func challenge(factor: UInt8) -> [UInt8] {
+            [UInt8(ascii: "P"), factor] + [UInt8](repeating: 0x5A, count: MySQLParsec.saltLength)
+        }
+
+        for factor: UInt8 in 0...3 {
+            let parsed = try MySQLParsec.AuthString.parse(challenge(factor: factor))
+            #expect(parsed.factor == factor)
+            #expect(parsed.iterations == 1024 << Int(factor))
+        }
+        #expect(throws: MySQLProtocolError.self) {
+            _ = try MySQLParsec.AuthString.parse(challenge(factor: 4))
+        }
+        #expect(throws: MySQLProtocolError.self) {
+            _ = try MySQLParsec.AuthString.parse(challenge(factor: 255))
+        }
+    }
+
+    /// The algorithm marker and the length, which frame everything after them.
+    @Test("a challenge of the wrong shape is refused")
+    func malformedChallenge() throws {
+        let salt = [UInt8](repeating: 0x5A, count: MySQLParsec.saltLength)
+
+        #expect(throws: MySQLProtocolError.self) {
+            _ = try MySQLParsec.AuthString.parse([UInt8(ascii: "X"), 1] + salt)
+        }
+        #expect(throws: MySQLProtocolError.self) {
+            _ = try MySQLParsec.AuthString.parse([UInt8(ascii: "P"), 1])
+        }
+        #expect(throws: MySQLProtocolError.self) {
+            _ = try MySQLParsec.AuthString.parse([])
+        }
+        #expect(throws: MySQLProtocolError.self) {
+            _ = try MySQLParsec.AuthString.parse([UInt8(ascii: "P"), 1] + salt + [0x00])
+        }
+    }
+
+    /// The salt is everything after the two header bytes, and it has to survive
+    /// intact — a slice taken from the wrong offset changes every derived key.
+    @Test("the salt is the bytes after the header, unaltered")
+    func saltIsPreserved() throws {
+        let salt = (0..<MySQLParsec.saltLength).map { UInt8($0 % 256) }
+        let parsed = try MySQLParsec.AuthString.parse([UInt8(ascii: "P"), 2] + salt)
+        #expect(parsed.salt == salt)
+        #expect(parsed.factor == 2)
+    }
+
 }
