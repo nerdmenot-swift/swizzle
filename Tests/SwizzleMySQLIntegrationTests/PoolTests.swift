@@ -316,6 +316,21 @@ struct PoolTests {
             }
             group.addTask {
                 _ = try? await client.query("SELECT 1")
+                // Waited for, not sampled once. `query` returns when the
+                // *acquisition* deadline expires and the pool records a failed
+                // connect on its own timeline, so the two are ordered only by
+                // luck. This passed here on every run, loaded or idle, and
+                // failed on Linux CI with `failedConnects == 0` — the attempt
+                // was still in flight when the waiter gave up, which the pool
+                // reports as `connecting` rather than as a failure.
+                //
+                // The assertion is not weakened: a pool that never counts the
+                // failure still fails, five seconds later. What goes away is the
+                // assumption that an attempt has *finished* by the time the
+                // caller is told it cannot have a connection.
+                try await eventually(within: .seconds(5), "a failed connect to be recorded") {
+                    client.statistics.failedConnects >= 1
+                }
                 return client.statistics
             }
             var result: MySQLPoolStatistics?
