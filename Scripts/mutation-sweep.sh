@@ -47,15 +47,20 @@ FILTER="${2:-}"
 #
 # `git worktree` rather than `cp -r`: it gives a clean checkout of HEAD with no
 # `.build` to copy, and removing it cannot touch the original.
-# `$TMPDIR` on macOS ends in a slash, and the guard below compares this path
-# against one that has been through `cd … && pwd` — which normalises `//` to `/`.
-# So the arena was `…/T//swizzle-mutation/tree`, every resolved file was
-# `…/T/swizzle-mutation/tree/…`, the prefix test failed for every file, and the
-# safety check refused to mutate anything at all. A guard that stops the tool
-# running is worth as little as one that never fires.
+# The arena is **per target**, so two sweeps can run at once.
+#
+# It was one shared path, so starting a MySQL sweep while a Postgres one was
+# still going failed with "fatal: … already exists" from `git worktree add` —
+# and the failure came *after* `rm -rf "$ARENA"` had already deleted the running
+# sweep's checkout out from under it. One tool, two invocations, and the second
+# quietly destroys the first.
+#
+# The target path is turned into a name rather than hashed, so the directory says
+# which sweep owns it when something goes wrong at three in the morning.
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPROOT="${TMPDIR:-/tmp}"
-WORK="${TMPROOT%/}/swizzle-mutation"
+SLUG="$(echo "$TARGET" | tr '/' '-' | tr -cd 'A-Za-z0-9-')"
+WORK="${TMPROOT%/}/swizzle-mutation-$SLUG"
 ARENA="$WORK/tree"
 rm -rf "$ARENA"
 mkdir -p "$WORK"

@@ -79,9 +79,25 @@ extension ByteBuffer {
     }
 
     /// Length-encoded string: a length-encoded integer followed by that many bytes.
+    ///
+    /// The length is bounded before it becomes an `Int`, and that guard is not
+    /// theoretical: `Int(someUInt64)` **traps** above `Int64.max`, and a
+    /// length-encoded integer is eight bytes of whatever the peer sent. A packet
+    /// beginning `0xFE` followed by eight high bytes took the process down —
+    /// found by fuzzing this decoder with random bytes, which is the only kind of
+    /// test that reaches it, because a well-behaved server never sends one.
+    ///
+    /// Every length-encoded string in the protocol comes through here — column
+    /// names, values, the lot — so this was reachable from any packet on any
+    /// connection.
+    ///
+    /// Checked against `readableBytes` rather than against `Int.max`: a length
+    /// longer than the buffer is malformed regardless, so the narrower bound is
+    /// both safe and more honest about what is wrong.
     public mutating func readLengthEncodedSlice() -> ByteBuffer? {
         let save = readerIndex
         guard let length = readLengthEncodedInteger(),
+              length <= UInt64(readableBytes),
               let slice = readSlice(length: Int(length))
         else {
             moveReaderIndex(to: save)

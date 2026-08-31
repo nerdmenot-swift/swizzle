@@ -177,11 +177,19 @@ struct MySQLProtocolOracleTests {
             // failure — `MEDIUMINT` exists everywhere, `VECTOR` does not.
             return
         }
-        defer { Task { try? await connection.query("DROP TABLE IF EXISTS \(table)") } }
+        // Dropped **awaited** at the end rather than in a deferred Task.
+        //
+        // `defer { Task { … } }` is the idiom this suite inherited, and it leaks:
+        // the Task is unstructured, nothing waits for it, and it frequently does
+        // not run before the process exits. The fixtures had accumulated
+        // thousands of tables — 4042 on one server — from exactly this pattern
+        // across many runs, which is both a slow information_schema and a
+        // fixture that no longer resembles a fresh one.
 
         for literal in subject.literals {
             _ = try await Self.compare(connection, table: table, literal: literal)
         }
+        _ = try? await connection.query("DROP TABLE IF EXISTS \(table)")
     }
 
     // MARK: - Completeness

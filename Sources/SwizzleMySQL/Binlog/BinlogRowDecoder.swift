@@ -87,6 +87,34 @@ public enum MySQLBinlogRowDecoder {
         return values
     }
 
+
+    /// Narrows an integer, throwing rather than trapping when it does not fit.
+    ///
+    /// Every packed temporal field below is built from raw bytes the server
+    /// sent, so its value is only as trustworthy as the stream. `UInt16(x)`
+    /// **traps** when `x` is too large, and a trap in a binlog consumer takes the
+    /// process down — the one thing a replication client must never do, because
+    /// it is reading a stream it cannot pause and cannot skip.
+    ///
+    /// This was reachable: a `DATETIME` whose eight bytes are not a valid packed
+    /// datetime — a desynchronised stream, or a column type resolved wrongly —
+    /// gave `date / 10_000` far above `UInt16.max` and crashed. Found when an
+    /// unrelated test suite began writing exotic column types and the binlog
+    /// suites, reading the same server's log concurrently, met them.
+    ///
+    /// Throwing turns that into a decode error the caller already handles.
+    static func narrow<Target: FixedWidthInteger, Source: BinaryInteger>(
+        _ value: Source, _ field: String
+    ) throws -> Target {
+        guard let narrowed = Target(exactly: value) else {
+            throw MySQLProtocolError.malformedPacket(
+                "binlog: \(field) is \(value), which is not a valid value for this field — "
+                + "the row event does not match the table map it was decoded against"
+            )
+        }
+        return narrowed
+    }
+
     static func decodeValue(
         _ buffer: inout ByteBuffer, type: UInt8, metadata: UInt16
     ) throws -> MySQLValue {
@@ -255,7 +283,7 @@ public enum MySQLBinlogRowDecoder {
             let bytes = try need(3)
             let packed = Int(bytes[0]) | (Int(bytes[1]) << 8) | (Int(bytes[2]) << 16)
             return .dateTime(MySQLDateTime(
-                year: UInt16(packed / 16 / 32),
+                year: try narrow(packed / 16 / 32, "DATE year"),
                 month: UInt8((packed / 32) % 16),
                 day: UInt8(packed % 32),
                 hour: 0, minute: 0, second: 0, microsecond: 0
@@ -269,7 +297,7 @@ public enum MySQLBinlogRowDecoder {
             let bytes = try need(3)
             let packed = Int(bytes[0]) | (Int(bytes[1]) << 8) | (Int(bytes[2]) << 16)
             return .dateTime(MySQLDateTime(
-                year: UInt16(packed >> 9),
+                year: try narrow(packed >> 9, "NEWDATE year"),
                 month: UInt8((packed >> 5) & 15),
                 day: UInt8(packed & 31),
                 hour: 0, minute: 0, second: 0, microsecond: 0
@@ -297,12 +325,12 @@ public enum MySQLBinlogRowDecoder {
             let date = packed / 1_000_000
             let time = packed % 1_000_000
             return .dateTime(MySQLDateTime(
-                year: UInt16(date / 10_000),
-                month: UInt8((date / 100) % 100),
-                day: UInt8(date % 100),
-                hour: UInt8(time / 10_000),
-                minute: UInt8((time / 100) % 100),
-                second: UInt8(time % 100),
+                year: try narrow(date / 10_000, "DATETIME year"),
+                month: try narrow((date / 100) % 100, "DATETIME month"),
+                day: try narrow(date % 100, "DATETIME day"),
+                hour: try narrow(time / 10_000, "DATETIME hour"),
+                minute: try narrow((time / 100) % 100, "DATETIME minute"),
+                second: try narrow(time % 100, "DATETIME second"),
                 microsecond: 0
             ))
 
@@ -315,7 +343,7 @@ public enum MySQLBinlogRowDecoder {
             let yearMonth = (packed >> 22) & 0x1FFFF
             let fractional = try need(fractionalByteCount(Int(metadata)))
             return .dateTime(MySQLDateTime(
-                year: UInt16(yearMonth / 13),
+                year: try narrow(yearMonth / 13, "DATETIME2 year"),
                 month: UInt8(yearMonth % 13),
                 day: UInt8((packed >> 17) & 0x1F),
                 hour: UInt8((packed >> 12) & 0x1F),
@@ -324,17 +352,31 @@ public enum MySQLBinlogRowDecoder {
                 microsecond: microseconds(fractional, precision: Int(metadata))
             ))
 
+        // `MySQLTime.hours` is documented `0...23`, with `days` carrying the
+        // overflow — which is how the wire protocol's own decoder builds it.
+        // Both cases below stuffed the *total* hour count into that `UInt8` and
+        // trapped above 255.
+        //
+        // That is not an edge case: MySQL's `TIME` range is
+        // `-838:59:59 … 838:59:59`, so any value past `256:00:00` crashed the
+        // binlog consumer — a legal column value taking down a replication
+        // client, which is the one thing it must not do because it cannot skip
+        // the row and cannot pause the stream.
+        //
+        // Found when an unrelated suite began writing `TIME(6)` columns and the
+        // binlog suites, reading the same server's log concurrently, met one.
         case .time:
             let bytes = try need(3)
             var packed = Int(bytes[0]) | (Int(bytes[1]) << 8) | (Int(bytes[2]) << 16)
             let isNegative = packed < 0
             if isNegative { packed = -packed }
+            let totalHours = packed / 10_000
             return .time(MySQLTime(
                 isNegative: isNegative,
-                days: 0,
-                hours: UInt8(packed / 10_000),
-                minutes: UInt8((packed / 100) % 100),
-                seconds: UInt8(packed % 100),
+                days: try narrow(totalHours / 24, "TIME days"),
+                hours: try narrow(totalHours % 24, "TIME hours"),
+                minutes: try narrow((packed / 100) % 100, "TIME minutes"),
+                seconds: try narrow(packed % 100, "TIME seconds"),
                 microseconds: 0
             ))
 
@@ -344,12 +386,14 @@ public enum MySQLBinlogRowDecoder {
             for byte in bytes { packed = (packed << 8) | UInt32(byte) }
             packed &-= 0x800000                            // sign bias
             let fractional = try need(fractionalByteCount(Int(metadata)))
+            // Ten bits of hours, so up to 1023 — well past what a `UInt8` holds.
+            let totalHours = (packed >> 12) & 0x3FF
             return .time(MySQLTime(
                 isNegative: false,
-                days: 0,
-                hours: UInt8((packed >> 12) & 0x3FF),
-                minutes: UInt8((packed >> 6) & 0x3F),
-                seconds: UInt8(packed & 0x3F),
+                days: try narrow(totalHours / 24, "TIME2 days"),
+                hours: try narrow(totalHours % 24, "TIME2 hours"),
+                minutes: try narrow((packed >> 6) & 0x3F, "TIME2 minutes"),
+                seconds: try narrow(packed & 0x3F, "TIME2 seconds"),
                 microseconds: microseconds(fractional, precision: Int(metadata))
             ))
 

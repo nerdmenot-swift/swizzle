@@ -277,4 +277,55 @@ struct BinlogColumnTypeTests {
         #expect(rows[1][1].isNull)
         #expect(rows[1][2].int == 987_654, "sentinel corrupted on the NULL path")
     }
+
+    // MARK: - TIME beyond a day
+
+    /// MySQL's `TIME` range is `-838:59:59 … 838:59:59`, and the binlog decoder
+    /// crashed on anything past `256:00:00`.
+    ///
+    /// `MySQLTime.hours` is documented `0...23` with `days` carrying the
+    /// overflow — the wire protocol's decoder splits them and the binlog decoder
+    /// did not, stuffing the total hour count into a `UInt8`. A legal column
+    /// value took down the replication client, which cannot skip the row or
+    /// pause the stream.
+    ///
+    /// Found because an unrelated suite began writing `TIME(6)` columns and the
+    /// binlog suites, reading the same server's log concurrently, met one — a
+    /// crash nothing here would have produced on its own.
+    @Test("a TIME beyond a day survives the binlog round trip",
+          arguments: TestServers.all)
+    func largeTimeInBinlog(server: MySQLTestServer) async throws {
+        let connection = try await BinlogTests.connect(server)
+        defer { connection.closeImmediately() }
+
+        let table = "binlog_time_\(UInt32.random(in: 0..<UInt32.max))"
+        _ = try await connection.query("CREATE TABLE \(table) (id INT PRIMARY KEY, v TIME(6))")
+        let start = try await connection.binlogPosition()
+
+        // Every hour magnitude the encoding has to survive, including the ends
+        // of MySQL's documented range.
+        let values = ["'00:00:00.000000'", "'23:59:59.999999'", "'24:00:00.000000'",
+                      "'255:00:00.000000'", "'256:00:00.000000'", "'838:59:59.000000'",
+                      "'-838:59:59.000000'", "'-256:00:00.000000'"]
+        for (index, value) in values.enumerated() {
+            _ = try await connection.query(
+                "INSERT INTO \(table) (id, v) VALUES (\(index), \(value))"
+            )
+        }
+
+        // The decode is the assertion: before the fix this trapped rather than
+        // returning anything to compare.
+        let events = try await BinlogTests.collect(server, from: start)
+        let rows = events.compactMap { event -> MySQLRowsEvent? in
+            guard case .rows(let rows) = event.payload, rows.table.table == table else {
+                return nil
+            }
+            return rows
+        }
+        let total = rows.reduce(0) { $0 + $1.rows.count }
+        #expect(total == values.count, "every inserted row should have decoded")
+
+        _ = try? await connection.query("DROP TABLE IF EXISTS \(table)")
+    }
+
 }
