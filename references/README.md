@@ -99,6 +99,48 @@ Consult the others only for a *named question*, never for architecture:
 - **libpq**, in the PostgreSQL source tree, is the authority when two references
   disagree. Not cloned by the script — read it online.
 
+## The reference this list was missing
+
+**For anything this driver *renders*, the specification is the server's own
+`*_out` function, not any client.** That omission cost eight bugs.
+
+The driver's promise for a decoded value is that it reads identically whichever
+format it arrived in — so a binary `tsquery`, `interval`, composite or array is
+rendered back into the text Postgres itself would print. **No client library has
+that code.** `libpq` does not decode binary at all: `PQgetvalue` hands back the
+server's bytes and the application interprets them. `rust-postgres` decodes into
+*Rust* types — `chrono::NaiveDate`, `Decimal` — and never renders. So the
+reference list above, which is entirely clients, could not answer the question
+this driver actually asks.
+
+What it cost, all found by comparing against a live server rather than a
+reference:
+
+| what was wrong | where it is specified |
+|---|---|
+| composite collapsed NULL and `''`, and escaped `"` with a backslash | `record_out` |
+| `tsquery` parenthesis spacing and prefix-marker order | `tsqueryout` |
+| interval pluralised `-1 year` instead of `-1 years` | `interval_out` |
+| dates before 1582 were two days out | `j2date` / `date2j` |
+| `time` and `timetz` were not decoded at all | `time_out`, `timetz_out` |
+| non-finite floats in arrays printed `nan`, not `NaN` | `array_out` / `float8out` |
+
+These live in `src/backend/utils/adt/` in the PostgreSQL source. Read them online
+rather than cloning: the tree is large, the files are stable, and the point is to
+cite the function that defines the output when writing a renderer — as
+`PostgresExtendedTypes` now does at each site.
+
+`chrono` and the `time` crate are worth a second mention here for the calendar
+specifically. Both are **proleptic** Gregorian, which is what Postgres uses;
+Foundation's `Calendar(identifier: .gregorian)` is not, and switches to Julian
+before 1582. Porting the arithmetic from Rust would have avoided that one.
+
+**And the check that makes the reference question moot**:
+`PostgresBinaryOracleTests` compares every type's binary decode against the
+server's own text rendering, driven off `PostgresOID.allCases` so a new decoder
+without a case fails the suite. A reference tells you what the format is; only
+the server tells you what it prints.
+
 Where two references disagree, the Rust pair wins unless there is a specific
 reason recorded in the code.
 
