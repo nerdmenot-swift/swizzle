@@ -171,7 +171,13 @@ enum PostgresExtendedTypes {
     }
 
     static func decodeRange(
-        _ buffer: inout ByteBuffer, elementOID: UInt32
+        _ buffer: inout ByteBuffer, elementOID: UInt32,
+        // Set by the type registry when the subtype is a *user* type.
+        // Without it a range over a domain rendered its bounds as the raw
+        // big-endian bytes — `[\0\0\0\u{01},…)` instead of `[1,10)` — because
+        // `PostgresValueDecoder` only knows built-in OIDs and there was no
+        // way to reach the registry from here.
+        decodeElement: ((_ bytes: [UInt8], _ oid: UInt32) -> SQLValue?)? = nil
     ) -> SQLValue? {
         guard let flags: UInt8 = buffer.readInteger() else { return nil }
         if flags & rangeEmpty != 0 { return .text("empty") }
@@ -184,7 +190,8 @@ enum PostgresExtendedTypes {
             guard let length: Int32 = buffer.readInteger(), length >= 0,
                   let bytes = buffer.readBytes(length: Int(length))
             else { return nil }
-            let value = PostgresValueDecoder.decode(bytes, oid: elementOID, format: 1)
+            let value = decodeElement?(bytes, elementOID)
+                ?? PostgresValueDecoder.decode(bytes, oid: elementOID, format: 1)
             return quotedBound(PostgresArray.plainText(value))
         }
 
@@ -210,7 +217,13 @@ enum PostgresExtendedTypes {
     /// it, and it is a decode nobody has to write twice — the per-range work is
     /// the same `decodeRange` used for the singular form.
     static func decodeMultirange(
-        _ buffer: inout ByteBuffer, elementOID: UInt32
+        _ buffer: inout ByteBuffer, elementOID: UInt32,
+        // Set by the type registry when the subtype is a *user* type.
+        // Without it a range over a domain rendered its bounds as the raw
+        // big-endian bytes — `[\0\0\0\u{01},…)` instead of `[1,10)` — because
+        // `PostgresValueDecoder` only knows built-in OIDs and there was no
+        // way to reach the registry from here.
+        decodeElement: ((_ bytes: [UInt8], _ oid: UInt32) -> SQLValue?)? = nil
     ) -> SQLValue? {
         guard let count: Int32 = buffer.readInteger(), count >= 0 else { return nil }
 
@@ -219,7 +232,9 @@ enum PostgresExtendedTypes {
         for _ in 0..<count {
             guard let length: Int32 = buffer.readInteger(), length >= 0,
                   var slice = buffer.readSlice(length: Int(length)),
-                  case .text(let rendered)? = decodeRange(&slice, elementOID: elementOID)
+                  case .text(let rendered)? = decodeRange(
+                    &slice, elementOID: elementOID, decodeElement: decodeElement
+                  )
             else { return nil }
             ranges.append(rendered)
         }

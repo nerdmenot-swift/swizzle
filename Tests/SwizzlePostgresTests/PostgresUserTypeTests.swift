@@ -28,6 +28,15 @@ struct PostgresUserTypeTests {
         CREATE DOMAIN positive_int AS int CHECK (VALUE > 0);
         CREATE DOMAIN short_text AS varchar(10);
         CREATE TYPE intrange AS RANGE (subtype = int4);
+
+        -- Nested types: each of these points at another **user** type rather
+        -- than a built-in, which is what makes the registry recurse. Every
+        -- fixture above is one level deep, so the resolution rounds — and the
+        -- three places that decide what to ask for next — were never entered.
+        CREATE DOMAIN strict_positive AS positive_int CHECK (VALUE > 10);
+        CREATE TYPE person AS (name short_text, home address, feeling mood);
+        CREATE TYPE posrange AS RANGE (subtype = positive_int);
+        CREATE DOMAIN deep_domain AS strict_positive;
         """
 
     static func open() async throws -> PostgresConnection {
@@ -242,6 +251,94 @@ struct PostgresUserTypeTests {
         )
         #expect(rows.rows.first?.first == .text("(,x)"))
         #expect(rows.rows.first?.last == .text("(\"\",x)"))
+    }
+
+
+    // MARK: - Types that reference other user types
+
+    /// The resolution rounds, which every fixture above left unentered.
+    ///
+    /// `resolve` fetches a batch, then looks at what that batch *referenced* —
+    /// a domain's base, a range's subtype, a composite's field types — and goes
+    /// round again for anything new. Three separate places decide what goes into
+    /// the next round, and all three were mutation survivors, because every type
+    /// in this suite pointed at a built-in and so nothing was ever added.
+    ///
+    /// A domain over a domain is the smallest case that needs a second round:
+    /// resolving `strict_positive` yields `positive_int`, which is itself a user
+    /// type and has to be fetched before the value can be decoded at all.
+    @Test("a domain over a domain resolves through both levels")
+    func nestedDomain() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        let rows = try await connection.query(
+            "SELECT $1::strict_positive", [.text("42")]
+        ).rows
+        #expect(rows.first?[0] == .int(42), "it must decode as its eventual base, int4")
+    }
+
+    /// Three levels, so the loop runs a third time rather than merely twice —
+    /// the difference between "recurses" and "recurses once".
+    @Test("a domain three levels deep still reaches its base type")
+    func deeplyNestedDomain() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        let rows = try await connection.query("SELECT $1::deep_domain", [.text("99")]).rows
+        #expect(rows.first?[0] == .int(99))
+    }
+
+    /// A composite whose fields are themselves user types: a domain, another
+    /// composite, and an enum. Each field's OID has to be added to the next round
+    /// or the nested values decode as raw bytes.
+    @Test("a composite of user types resolves every field's type")
+    func compositeOfUserTypes() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        try await Self.agreeBinaryAndText(
+            connection,
+            literal: "(short,\"(1 High St,Springfield,AB1)\",happy)",
+            type: "person"
+        )
+    }
+
+    /// A range whose subtype is a domain — the third of the three references,
+    /// and the one that reaches `decodeRange` with a user-typed element.
+    @Test("a range over a domain resolves its subtype")
+    func rangeOverDomain() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        try await Self.agreeBinaryAndText(connection, literal: "[1,10)", type: "posrange")
+    }
+
+    /// Binary against text, the way `PostgresExtendedTypeTests` does it — a
+    /// binding forces the extended protocol and so the binary decoder, while the
+    /// literal takes the simple one and gets the server's own rendering.
+    ///
+    /// `queryResolvingTypes` on the binary side, not `query`: resolution is what
+    /// teaches the registry about the type before its value is decoded, and the
+    /// plain call skips it. Getting that wrong is how the first version of these
+    /// tests "found" two bugs that were mine.
+    ///
+    /// Written out here rather than reused because this suite had no such helper,
+    /// and the one in the text-search suite compared text against text.
+    static func agreeBinaryAndText(
+        _ connection: PostgresConnection, literal: String, type: String,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws {
+        let binary = try await connection.queryResolvingTypes(
+            "SELECT $1::\(type)", [.text(literal)]
+        ).rows
+        let quoted = literal.replacingOccurrences(of: "'", with: "''")
+        let text = try await connection.query("SELECT '\(quoted)'::\(type)").rows
+        #expect(
+            binary.first?[0] == text.first?[0],
+            "\(type) '\(literal)': binary \(binary.first?[0] as Any), text \(text.first?[0] as Any)",
+            sourceLocation: sourceLocation
+        )
     }
 
 }

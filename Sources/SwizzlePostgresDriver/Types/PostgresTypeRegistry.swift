@@ -192,7 +192,13 @@ public final class PostgresTypeRegistry: Sendable {
             }
             var buffer = ByteBuffer(bytes: bytes)
             return PostgresExtendedTypes.decodeRange(
-                &buffer, elementOID: type.rangeSubtypeOID
+                &buffer, elementOID: type.rangeSubtypeOID,
+                // A range whose subtype is itself a user type — a domain, say —
+                // needs the registry to decode its bounds. Without this they
+                // came back as the raw wire bytes.
+                decodeElement: { [weak self] bytes, oid in
+                    self?.decode(bytes, oid: oid, format: 1)
+                }
             )
 
         case .composite:
@@ -324,7 +330,12 @@ enum PostgresCompositeLiteral {
         guard needsQuotes else { return text }
         let escaped = text
             .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+            // A quote is **doubled**, not backslash-escaped. Postgres prints
+            // `("a""b")` for a field containing one — confirmed against the
+            // server — and this emitted `("a\\"b")`. It parses back either way,
+            // which is why nothing noticed, but it is not what the server shows
+            // for the same row.
+            .replacingOccurrences(of: "\"", with: "\"\"")
         return "\"\(escaped)\""
     }
 }
