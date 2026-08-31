@@ -95,7 +95,20 @@ struct PostgresConnectTimeoutTests {
         var configuration = PostgresConnectionConfiguration(
             address: .tcp(host: "127.0.0.1", port: port), username: "swizzle"
         )
-        configuration.connectTimeout = .milliseconds(500)
+        // Two seconds, not 500 ms, and the reason is the *accept* rather than
+        // the stall.
+        //
+        // The server above is a local listening socket, so the TCP connect
+        // normally completes instantly — but on a loaded runner the accept can
+        // take longer than the deadline, and then NIO's own bootstrap timeout
+        // fires first and throws a `ChannelError` this catch does not expect.
+        // Linux CI failed exactly that way.
+        //
+        // Raising it does not weaken the assertion. The server never speaks, so
+        // without the whole-connection deadline this hangs forever regardless of
+        // the value; what the number buys is that the timeout which fires is the
+        // one under test rather than the TCP one.
+        configuration.connectTimeout = .seconds(2)
         // `disable`, so the stall is in the startup exchange rather than in a TLS
         // handshake — both are covered, and this is the one with fewer moving
         // parts.
@@ -108,7 +121,7 @@ struct PostgresConnectTimeoutTests {
             connection.closeImmediately()
             Issue.record("a silent server must not produce a usable connection")
         } catch let error as PostgresConnectionError {
-            #expect(error == .connectTimeout(.milliseconds(500)))
+            #expect(error == .connectTimeout(.seconds(2)))
         }
     }
 

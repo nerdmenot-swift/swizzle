@@ -61,7 +61,18 @@ struct PostgresReadTimeoutTests {
                 configuration: configuration, on: group.next())
             connection.closeImmediately()
         }
-        #expect(ContinuousClock().now - started < .seconds(10))
+        // Thirty seconds, not ten. The assertion is **"this does not hang"**, and
+        // the deadlines that make it true are the 500 ms connect and the 2 s read
+        // above — this number only has to be larger than their sum by enough that
+        // a loaded machine cannot cross it.
+        //
+        // Ten was not. Linux CI measured 10.99 s, which is scheduler starvation
+        // rather than a driver that waited too long, and the comment above about
+        // "choosing a bound that a live connection cannot meet tests the runner"
+        // applies to this line too.
+        //
+        // A driver that genuinely hangs still fails this, thirty seconds later.
+        #expect(ContinuousClock().now - started < .seconds(30))
     }
 
     /// An idle connection is left alone; a working one is undisturbed.
