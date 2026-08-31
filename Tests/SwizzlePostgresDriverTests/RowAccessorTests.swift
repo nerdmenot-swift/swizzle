@@ -107,6 +107,7 @@ struct RowAccessorTests {
     func arrayBeyondTheValues() {
         let row = Self.row([.text("{a}")], ["a", "b", "c"], oid: 1009)
         #expect(row.array(at: 0) != nil)
+        #expect(row.array(at: 1) == nil, "exactly one past the delivered values — the boundary")
         #expect(row.array(at: 2) == nil, "described but not delivered")
         #expect(row.array(at: 9) == nil, "not described either")
         #expect(row.array(at: -1) == nil, "and below the start")

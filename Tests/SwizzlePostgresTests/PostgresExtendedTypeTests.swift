@@ -398,4 +398,67 @@ struct PostgresExtendedTypeTests {
             Issue.record("expected readable text, got \(rows[0][0])"); return
         }
     }
+
+    // MARK: - numeric
+
+    /// `numeric` was not in this table, which is why its binary decoder's
+    /// fraction handling had mutation survivors: the trailing-zero padding that
+    /// makes `1.10` come back as `1.10` rather than `1.1` is a property of the
+    /// *binary* form, and nothing compared the two formats for this type.
+    ///
+    /// The display scale is carried on the wire and the fraction is padded up to
+    /// it, so the cases that matter are the ones where the digits and the scale
+    /// disagree — a value with fewer significant digits than its scale, a value
+    /// with none at all, and the sign.
+    @Test("numeric agrees between binary and text")
+    func numericAgrees() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        for literal in [
+            "0", "1", "-1", "1.1", "1.10", "1.100", "0.001", "-0.001",
+            "1234567890.12345", "-1234567890.12345",
+            "0.00000000000001", "100000000000000",
+            // Weight boundaries: the base-10000 groups either side of the point.
+            "9999", "10000", "99999999", "0.0001", "0.00001",
+            // Scale with no fraction, and a whole number carrying one.
+            "123.000", "123.4560",
+        ] {
+            try await check(connection, literal, "numeric")
+        }
+    }
+
+    /// `NaN` is a numeric value with no digits at all, and its own sign word.
+    @Test("numeric NaN agrees between binary and text")
+    func numericNaN() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+        try await check(connection, "NaN", "numeric")
+    }
+
+    // MARK: - xid8
+
+    /// A 64-bit transaction id is **unsigned**, and `SQLValue` has no unsigned
+    /// case — so anything past `Int64.max` renders as text rather than wrapping
+    /// into a negative. The boundary had a survivor, and nothing exercised it.
+    ///
+    /// Unreachable in practice, as the comment at the decoder says: the counter
+    /// would need centuries. It is here because a silent wrap is precisely the
+    /// failure that check exists to prevent, and an untested guard against an
+    /// unreachable case is indistinguishable from no guard at all.
+    @Test("xid8 agrees between binary and text, including past Int64.max")
+    func xid8Agrees() async throws {
+        let connection = try await Self.open()
+        defer { connection.closeImmediately() }
+
+        for literal in [
+            "0", "1", "4294967295",
+            "9223372036854775807",   // Int64.max — the last value that fits
+            "9223372036854775808",   // one past it, which must not become negative
+            "18446744073709551615",  // UInt64.max
+        ] {
+            try await check(connection, literal, "xid8")
+        }
+    }
+
 }
