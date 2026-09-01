@@ -80,6 +80,14 @@ public final class MySQLQueryAnalyzer: QueryAnalyzer, @unchecked Sendable {
 
         // `originalTable` is empty for an expression, aggregate or literal —
         // the same signal SQLite gives through a missing origin name.
+        //
+        // Testing both fields is defensive rather than load-bearing, and no
+        // test kills a mutation of it: probing the fixtures across aliases,
+        // literals, aggregates and derived tables found no query where exactly
+        // one of the two is empty — the server sets both or neither. Kept
+        // because "an origin needs both halves to be usable" is the actual
+        // requirement, and relying on them moving together is an assumption
+        // about the server rather than about this code.
         let origin = column.originalTable.isEmpty || column.originalName.isEmpty
             ? nil
             : ColumnOrigin(

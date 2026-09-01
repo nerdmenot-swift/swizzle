@@ -226,4 +226,59 @@ struct MySQLAnalyzerTests {
         }
         await analyzer.finish()
     }
+
+    /// The rendered SQL type name, which goes into the lockfile and into
+    /// `--verify` diffs — so a wrong one is a spurious diff on every run.
+    ///
+    /// The `binary` suffix is the part with a trap in it. MySQL's `BINARY_FLAG`
+    /// does **not** mean "this is a binary column": it is an old flag meaning
+    /// "not a character column", and the server sets it on integers too —
+    /// verified here rather than assumed, because it is the reason the type
+    /// check exists. Rendering the flag alone would put " binary" after every
+    /// `BIGINT` in the lockfile.
+    @Test("the binary suffix follows the type, not just the flag",
+          arguments: [TestServers.latest])
+    func binarySuffixNeedsAStringType(server: MySQLTestServer) async throws {
+        let connection = try await Self.connect(server)
+        defer { connection.closeImmediately() }
+
+        let table = "bintype_\(UInt32.random(in: 0..<UInt32.max))"
+        _ = try await connection.query(
+            """
+            CREATE TABLE \(table) (
+                n      BIGINT NOT NULL,
+                vbin   VARBINARY(64),
+                fbin   BINARY(4),
+                blb    BLOB,
+                txt    VARCHAR(64)
+            )
+            """
+        )
+        let prepared = try await connection.prepare(
+            "SELECT n, vbin, fbin, blb, txt FROM \(table)"
+        )
+
+        var rendered: [String: String] = [:]
+        var flagged: [String: Bool] = [:]
+        for column in prepared.columns {
+            let type = MySQLColumnType(rawValueOrUnknown: column.type)
+            rendered[column.name] = MySQLQueryAnalyzer.sqlTypeName(type, column: column)
+            flagged[column.name] = column.isBinary
+        }
+
+        #expect(
+            flagged["n"] == true,
+            "the premise: MySQL sets BINARY_FLAG on an integer, so the flag alone cannot decide the suffix"
+        )
+        #expect(rendered["n"]?.contains("binary") == false, "an integer is not binary")
+        #expect(rendered["vbin"]?.hasSuffix(" binary") == true, "VARBINARY is")
+        #expect(rendered["fbin"]?.hasSuffix(" binary") == true, "so is BINARY")
+        #expect(
+            rendered["blb"]?.contains(" binary") == false,
+            "a BLOB is already a binary type; the suffix would be noise"
+        )
+        #expect(rendered["txt"]?.contains("binary") == false)
+
+        _ = try? await connection.query("DROP TABLE IF EXISTS \(table)")
+    }
 }
