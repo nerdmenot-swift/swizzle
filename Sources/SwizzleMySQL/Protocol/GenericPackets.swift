@@ -68,6 +68,9 @@ public struct MySQLOKPacket: Sendable, Equatable {
         var changes: [MySQLSessionStateChange] = []
 
         if capabilities.contains(.sessionTrack) {
+            // The emptiness check is a readability guard, not a correctness
+            // one — on an empty buffer the read below returns nil and `info`
+            // stays nil either way, so no test can kill a mutation of it.
             if buffer.readableBytes > 0 {
                 info = buffer.readLengthEncodedString()
             }
@@ -98,6 +101,8 @@ public struct MySQLOKPacket: Sendable, Equatable {
     ) -> [MySQLSessionStateChange] {
         var changes: [MySQLSessionStateChange] = []
 
+        // Likewise not load-bearing: the guard inside breaks on a short read,
+        // so the loop terminates on an empty buffer with or without this.
         while buffer.readableBytes > 0 {
             guard let type = buffer.readInteger(endianness: .little, as: UInt8.self),
                   var body = buffer.readLengthEncodedSlice()
