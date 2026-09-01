@@ -229,6 +229,179 @@ struct ResultSetStateMachineTests {
             Issue.record("expected rejection after completion"); return
         }
     }
+
+    // MARK: - LOAD DATA LOCAL INFILE
+
+    /// `0xFB` in the **column-count slot** is not a value — it is the server
+    /// asking the client to send it a file.
+    ///
+    /// The same byte inside a row means SQL NULL, which is why the test lives
+    /// here and not in the row decoder, and why getting it wrong is not a
+    /// decode error: the driver would read a filename as a column count and
+    /// wait for column definitions that never come.
+    ///
+    /// It also matters for a reason beyond correctness. The path is chosen by
+    /// the *server*, so a hostile one can ask for any file the client process
+    /// can read — the vulnerability `local_infile` exists to gate. Recognising
+    /// the request is what lets the driver refuse it.
+    @Test func localInfileRequestIsRecognised() {
+        var sm = Self.machine()
+        let action = sm.receive(Self.packet([0xFB] + Array("/etc/passwd".utf8)))
+        guard case .sendLocalFile(let path) = action else {
+            Issue.record("expected sendLocalFile, got \(action)"); return
+        }
+        #expect(path == "/etc/passwd", "the path comes from the server, not the client")
+        #expect(!sm.isFinished, "the exchange continues with the file's contents")
+    }
+
+    /// A bare `0xFB` with no path is still the request, not a column count.
+    @Test func localInfileWithNoPath() {
+        var sm = Self.machine()
+        guard case .sendLocalFile(let path) = sm.receive(Self.packet([0xFB])) else {
+            Issue.record("expected sendLocalFile"); return
+        }
+        #expect(path.isEmpty)
+    }
+
+    // MARK: - An error in the middle of the rows
+
+    /// A result set can fail **after** its columns and some of its rows — a
+    /// killed query, a lock timeout, a disk error partway through a scan. The
+    /// error packet arrives where a row would, so the row phase has to test for
+    /// it before treating the bytes as data.
+    @Test func errorDuringRowsFails() {
+        var sm = Self.machine(deprecateEOF: true)
+        #expect(sm.receive(Self.packet([0x01])) == .wait)
+        // The last definition completes the column phase, so this yields
+        // the columns rather than waiting for more.
+        guard case .columns = sm.receive(Self.columnPacket(name: "a")) else {
+            Issue.record("expected the column phase to complete"); return
+        }
+        _ = sm.receive(Self.rowPacket(["1"]))
+
+        let action = sm.receive(
+            Self.errPacket(code: 1317, sqlState: "70100", message: "Query execution was interrupted")
+        )
+        guard case .fail(let error) = action, case .server(let code, _, _) = error else {
+            Issue.record("expected a server error, got \(action)"); return
+        }
+        #expect(code == 1317)
+        #expect(sm.isFinished, "a failed result set is finished")
+    }
+
+    /// And `isFinished` covers both terminal states, not just the happy one —
+    /// a caller that only checks for `done` waits forever on a failure.
+    @Test func bothTerminalStatesAreFinished() {
+        var failed = Self.machine()
+        _ = failed.receive(Self.errPacket(code: 1146, sqlState: "42S02", message: "no table"))
+        #expect(failed.isFinished, "failed")
+
+        var done = Self.machine()
+        _ = done.receive(Self.okPacket())
+        #expect(done.isFinished, "done")
+
+        var running = Self.machine()
+        #expect(!running.isFinished, "before anything arrives")
+        _ = running.receive(Self.packet([0x01]))
+        #expect(!running.isFinished, "awaiting columns")
+    }
+
+    // MARK: - The column count's bounds
+
+    /// A column count of **zero** is not a result set, and it cannot be caught
+    /// by the OK-packet test above it: a zero written as a one-byte
+    /// length-encoded integer *is* `0x00`, which is an OK packet, so the only
+    /// way to reach the guard is a redundantly-encoded zero.
+    ///
+    /// A peer can send one, and without the guard the machine waits for zero
+    /// column definitions and then reads the next packet as a row.
+    @Test func zeroColumnCountIsRefused() {
+        var sm = Self.machine()
+        // 0 encoded in the three-byte form, so the first byte is not 0x00.
+        guard case .fail = sm.receive(Self.packet([0xFC, 0x00, 0x00])) else {
+            Issue.record("a zero column count should not begin a result set"); return
+        }
+        #expect(sm.isFinished)
+    }
+
+    /// The upper bound, at the value it turns over on. Above it the conversion
+    /// to `Int` is the problem; at it, the count is merely implausible and is
+    /// allowed, because no policy here can say where "too many columns" begins
+    /// without risking a legitimate wide result set.
+    @Test func columnCountUpperBound() {
+        var atLimit = Self.machine()
+        var bytes: [UInt8] = [0xFE]
+        let limit = UInt64(Int32.max)
+        for shift in 0..<8 { bytes.append(UInt8((limit >> (8 * shift)) & 0xFF)) }
+        #expect(atLimit.receive(Self.packet(bytes)) == .wait, "exactly at the bound is allowed")
+
+        var past = Self.machine()
+        var overBytes: [UInt8] = [0xFE]
+        let over = UInt64(Int32.max) + 1
+        for shift in 0..<8 { overBytes.append(UInt8((over >> (8 * shift)) & 0xFF)) }
+        guard case .fail = past.receive(Self.packet(overBytes)) else {
+            Issue.record("one past the bound should be refused"); return
+        }
+    }
+
+    // MARK: - The 0xFE boundary in the row phase
+
+    /// The row phase has its own copy of the terminator test, and it is the one
+    /// that decides where a result set ends. A row whose first column needs an
+    /// eight-byte length prefix begins with `0xFE` and must not be mistaken for
+    /// the end of the rows.
+    @Test func longRowIsNotATerminator() throws {
+        var sm = Self.machine(deprecateEOF: true)
+        #expect(sm.receive(Self.packet([0x01])) == .wait)
+        guard case .columns = sm.receive(Self.columnPacket(name: "a", type: 0xFD)) else {
+            Issue.record("expected the column phase to complete"); return
+        }
+
+        // 0xFE then an eight-byte length, then the value: a row, not a marker.
+        var row: [UInt8] = [0xFE, 0x10, 0, 0, 0, 0, 0, 0, 0]
+        row += [UInt8](repeating: 0x41, count: 16)
+        let action = sm.receive(Self.packet(row))
+        guard case .row = action else {
+            Issue.record("a 17-byte 0xFE packet is row data, got \(action)"); return
+        }
+        #expect(!sm.isFinished)
+
+        // And a short one does end it.
+        #expect(sm.isFinished == false)
+        _ = sm.receive(Self.eofStyleOK())
+        #expect(sm.isFinished, "an 0xFE packet under nine bytes is the terminator")
+    }
+
+    /// Nine bytes exactly, which is where the rule turns over.
+    ///
+    /// The threshold is not arbitrary: a row beginning with `0xFE` uses the
+    /// eight-byte length-encoded form, so it cannot be shorter than nine bytes,
+    /// while an EOF packet is five. Nine is therefore the first length that must
+    /// be read as data, and treating it as a terminator ends the result set one
+    /// row early — silently, since a short result set looks like a small table.
+    @Test func nineBytesIsRowDataNotATerminator() {
+        var sm = Self.machine(deprecateEOF: true)
+        #expect(sm.receive(Self.packet([0x01])) == .wait)
+        guard case .columns = sm.receive(Self.columnPacket(name: "a", type: 0xFD)) else {
+            Issue.record("expected the column phase to complete"); return
+        }
+
+        // 0xFE then eight length bytes: the shortest a row starting 0xFE can be.
+        let action = sm.receive(Self.packet([0xFE, 0, 0, 0, 0, 0, 0, 0, 0]))
+        guard case .row = action else {
+            Issue.record("a nine-byte 0xFE packet is row data, got \(action)"); return
+        }
+        #expect(!sm.isFinished)
+
+        // Eight bytes is one short, and is the terminator.
+        var shorter = Self.machine(deprecateEOF: true)
+        #expect(shorter.receive(Self.packet([0x01])) == .wait)
+        guard case .columns = shorter.receive(Self.columnPacket(name: "a", type: 0xFD)) else {
+            Issue.record("expected the column phase to complete"); return
+        }
+        _ = shorter.receive(Self.packet([0xFE, 0, 0, 0, 0, 0, 0, 0]))
+        #expect(shorter.isFinished, "eight bytes is under the threshold")
+    }
 }
 
 @Suite("Capability policy")
