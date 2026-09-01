@@ -288,6 +288,100 @@ struct NullBitmapTests {
         #expect(misread.isNull(2) == false)
         #expect(misread.isNull(4))     // shifted by the two reserved bits
     }
+
+    /// Every column of every width, set and read back — which is what catches
+    /// a bit offset applied on one side of the pair and not the other. The
+    /// existing cases above pin the offset at column zero; this pins it
+    /// everywhere else, including across byte boundaries.
+    @Test("every column round-trips through set and read",
+          arguments: [MySQLNullBitmap.Side.server, .client])
+    func everyColumnRoundTrips(side: MySQLNullBitmap.Side) {
+        for columns in [1, 2, 6, 7, 8, 9, 15, 16, 17, 33] {
+            for target in 0..<columns {
+                var bitmap = MySQLNullBitmap(columnCount: columns, side: side)
+                bitmap.setNull(target)
+                for column in 0..<columns {
+                    #expect(
+                        bitmap.isNull(column) == (column == target),
+                        "\(side), \(columns) columns, set \(target), read \(column)"
+                    )
+                }
+            }
+        }
+    }
+
+    /// Reading takes exactly the bitmap's own length and no more — the values
+    /// after it are the row, and a byte over or under shifts all of them.
+    @Test("reading consumes exactly the bitmap's length",
+          arguments: [MySQLNullBitmap.Side.server, .client])
+    func readConsumesExactly(side: MySQLNullBitmap.Side) throws {
+        for columns in [1, 7, 8, 9, 17] {
+            let length = MySQLNullBitmap.byteCount(columnCount: columns, side: side)
+            var buffer = ByteBuffer()
+            buffer.writeBytes([UInt8](repeating: 0xFF, count: length))
+            buffer.writeBytes([0xAB, 0xCD])                    // the value area
+
+            let bitmap = try MySQLNullBitmap.read(
+                from: &buffer, columnCount: columns, side: side
+            )
+            #expect(bitmap.bytes.count == length, "\(side) \(columns)")
+            #expect(buffer.readableBytes == 2, "\(side) \(columns): values left untouched")
+        }
+    }
+
+    /// A buffer too short for the bitmap is an error rather than a partial
+    /// read, because a partial bitmap mislabels columns silently.
+    @Test("a truncated bitmap is refused rather than partially read")
+    func truncatedBitmapIsRefused() {
+        for supplied in 0..<3 {
+            var buffer = ByteBuffer()
+            buffer.writeBytes([UInt8](repeating: 0xFF, count: supplied))
+            #expect(throws: MySQLProtocolError.self, "\(supplied) of 3 bytes") {
+                _ = try MySQLNullBitmap.read(from: &buffer, columnCount: 20, side: .server)
+            }
+        }
+    }
+
+    /// A column beyond the bitmap's **bytes** reads as `false` rather than
+    /// indexing past the array.
+    ///
+    /// Note what the guard is and is not. It bounds the byte index, not the
+    /// column count — so a one-byte bitmap still answers for any column whose
+    /// bit lands inside that byte, even past the column count it was built for.
+    /// Asking is a caller error either way; the contract is only that it does
+    /// not trap, and the column count comes from the server, so a bitmap can be
+    /// shorter than the questions asked of it.
+    @Test("a column beyond the bitmap's bytes does not trap")
+    func beyondTheBitmap() {
+        let bitmap = MySQLNullBitmap(bytes: [0xFF], columnCount: 4, side: .server)
+        // Inside the byte, so answered from the bits actually present.
+        #expect(bitmap.isNull(4))
+        #expect(bitmap.isNull(5))
+        // Past the byte: the guard, and no trap.
+        for column in [6, 8, 64, 1_000_000, Int.max / 8] {
+            #expect(!bitmap.isNull(column), "column \(column)")
+        }
+    }
+
+    /// And setting one is dropped rather than growing the bitmap, whose length
+    /// is fixed by the column count already agreed with the server.
+    @Test("setting a column beyond the bitmap's bytes is dropped")
+    func setBeyondTheBitmap() {
+        var bitmap = MySQLNullBitmap(columnCount: 4, side: .client)
+        #expect(bitmap.bytes.count == 1, "the premise: one byte, so bits 0...7")
+        for column in [8, 64, 1_000_000] { bitmap.setNull(column) }
+        #expect(bitmap.bytes == [0], "nothing past the byte was written")
+    }
+    /// A zero-column bitmap has no bytes at all, so every path through it is
+    /// the out-of-range one.
+    @Test("an empty bitmap answers rather than trapping")
+    func emptyBitmap() {
+        var bitmap = MySQLNullBitmap(bytes: [], columnCount: 0, side: .server)
+        #expect(!bitmap.isNull(0))
+        bitmap.setNull(0)
+        #expect(bitmap.bytes.isEmpty)
+        #expect(MySQLNullBitmap.byteCount(columnCount: 0, side: .client) == 0)
+    }
 }
 
 @Suite("Binary row")
