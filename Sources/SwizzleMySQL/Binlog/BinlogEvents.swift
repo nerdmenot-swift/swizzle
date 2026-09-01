@@ -390,7 +390,9 @@ public struct MySQLBinlogEventDecoder: Sendable {
                 break loop                                    // header end mark
             case 1:
                 guard let length = body.readLengthEncodedInteger() else { break loop }
-                body.moveReaderIndex(forwardBy: min(Int(length), body.readableBytes))
+                // The conversion has to happen after the clamp: Int() traps
+                // above Int64.max and the peer chooses this length.
+                body.moveReaderIndex(forwardBy: Int(min(length, UInt64(body.readableBytes))))
             case 2:
                 guard body.readLengthEncodedInteger() != nil,
                       let value = body.readLengthEncodedInteger() else { break loop }
@@ -398,10 +400,13 @@ public struct MySQLBinlogEventDecoder: Sendable {
             case 3:
                 guard body.readLengthEncodedInteger() != nil,
                       let value = body.readLengthEncodedInteger() else { break loop }
+                guard value <= UInt64(Int32.max) else { break loop }
                 uncompressedSize = Int(value)
             default:
                 guard let length = body.readLengthEncodedInteger() else { break loop }
-                body.moveReaderIndex(forwardBy: min(Int(length), body.readableBytes))
+                // The conversion has to happen after the clamp: Int() traps
+                // above Int64.max and the peer chooses this length.
+                body.moveReaderIndex(forwardBy: Int(min(length, UInt64(body.readableBytes))))
             }
         }
 

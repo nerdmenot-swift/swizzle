@@ -183,11 +183,17 @@ public struct MySQLResultSetStateMachine: Sendable {
             return .sendLocalFile(path: path)
         }
 
-        guard let count = buffer.readLengthEncodedInteger(), count > 0 else {
+        // `Int(count)` on its own traps above Int64.max, and the peer chooses
+        // this number: a 0xFE-prefixed length-encoded integer carries a full
+        // UInt64. The bound is the smaller question — reserving capacity for a
+        // claimed count is a memory-amplification vector, so the claim sizes the
+        // state machine but not the allocation.
+        guard let count = buffer.readLengthEncodedInteger(), count > 0,
+              count <= UInt64(Int32.max) else {
             return fail(.malformedPacket("invalid column count in command response"))
         }
         state = .awaitingColumns(remaining: Int(count))
-        columns.reserveCapacity(Int(count))
+        columns.reserveCapacity(min(Int(count), 64))
         return .wait
     }
 

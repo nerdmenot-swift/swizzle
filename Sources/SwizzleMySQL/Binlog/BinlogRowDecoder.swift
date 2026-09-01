@@ -454,6 +454,11 @@ public enum MySQLBinlogRowDecoder {
 
         var integerPart = ""
         let integerPartial = integerDigits % 9
+        // The guard is redundant with the leading-zero strip below — `take(0)`
+        // returns zero without consuming, and the "0" it would append is
+        // exactly what the strip removes — so mutating it away changes
+        // nothing. Kept because expressing "there is no partial group" as a
+        // zero-width read is worse than not reading.
         if integerPartial > 0 {
             integerPart += String(take(leftover[integerPartial]))
         }
@@ -527,6 +532,7 @@ public enum MySQLBinlogRowDecoder {
             var value: String?
             if operation != .remove {
                 guard let length = region.readLengthEncodedInteger(),
+                      length <= UInt64(region.readableBytes),   // Int(length) traps above Int64.max
                       let payload = region.readBytes(length: Int(length))
                 else {
                     throw MySQLProtocolError.malformedPacket("binlog: truncated JSON diff value")

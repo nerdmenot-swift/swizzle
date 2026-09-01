@@ -1082,3 +1082,33 @@ magnitude with `packed < 0 ? -packed : packed`. Negating `Int64.min` overflows
 and **traps** — and `packed` is eight bytes read straight out of a JSON document
 in a row image, so `00 00 00 00 00 00 00 80` from any peer took the process
 down. Now `packed.magnitude`, which is a `UInt64` and has no such edge.
+
+### The same length-conversion trap, in five more places
+
+Fixing `readLengthEncodedSlice` fixed one call site. Grepping for the shape
+once it was known found five others, all reachable from a peer:
+
+| site | field |
+|---|---|
+| `ResultSetStateMachine` | the **column count of every result set** |
+| `BinlogRowDecoder` | a JSON diff value's length in a partial-update image |
+| `BinlogEvents` ×2 | length fields skipped in the compressed-event header |
+| `BinlogEvents` | the uncompressed size in that same header |
+
+A `0xFE`-prefixed length-encoded integer carries a full `UInt64`. `Int(x)` above
+`Int64.max` traps — the process ends, and no `catch` sees it. Two of the binlog
+sites wrote `min(Int(length), readableBytes)`, where the clamp reads as a bound
+and is not one: the conversion happens before `min` is called. They now clamp in
+`UInt64` and convert after.
+
+The column count is the one that matters most, because it is not a binlog corner
+at all — it is the first length read of every command response, so any query on
+any connection reached it.
+
+Confirmed the same way each time: revert the guard, run the suite, observe
+`Fatal error: Not enough bits to represent the passed value` and signal 5.
+
+The lesson is about the *shape* rather than the site. Anywhere a width comes off
+the wire and is converted before being compared, the comparison is decoration.
+`Tests/SwizzleMySQLTests/WireLengthBoundsTests.swift` groups these by defect
+rather than by component, so a new call site has an obvious place to be tested.
