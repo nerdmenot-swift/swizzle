@@ -41,7 +41,16 @@ extension MySQLProtocolError: SQLDiagnosable {
         case 1021, 1114, 3: return .outOfSpace            // DISK_FULL, RECORD_FILE_FULL
         case 1290, 1836: return .readOnly                 // OPTION_PREVENTS_STATEMENT, READ_ONLY
 
-        case 1317, 3024: return .timeout                  // QUERY_INTERRUPTED, EXEC_TIME_EXCEEDED
+        // MySQL reports an exceeded `max_execution_time` as 3024; MariaDB
+        // reports its own `max_statement_time` as **1969**, which was not
+        // mapped at all and so arrived as `.other` — not transient, not
+        // recognisable as a timeout by any caller. Verified against all six
+        // fixtures rather than from the error tables: MySQL 8.0/8.4/9.1 give
+        // 3024 (HY000), MariaDB 11.4/12.3 give 1969 (70100).
+        //
+        // 1317 is a `KILL QUERY`, which is an operator's decision rather than a
+        // deadline, but arrives through the same abort path.
+        case 1317, 3024, 1969: return .timeout
         case 2006, 2013, 1053, 1077: return .connection   // SERVER_GONE / LOST / SHUTDOWN
 
         // The data itself is damaged. Retrying is pointless and the answer is a
@@ -66,15 +75,28 @@ extension MySQLProtocolError: SQLDiagnosable {
 
     /// Whether the statement might have taken effect.
     ///
-    /// A server error means the server saw the statement and rejected it, so
-    /// nothing was applied — that is the easy half. The hard half is a connection
-    /// that died: whether it died before or after the statement landed is exactly
-    /// what the wire cannot tell us, so the answer has to be the conservative one.
+    /// **This answers differently from the Postgres driver, deliberately.**
+    /// There, a server error means the statement applied nothing, because a
+    /// Postgres statement is atomic — the server wraps each one in an implicit
+    /// savepoint. MySQL makes no such promise: a statement against a
+    /// non-transactional engine can apply some rows and then fail, and a
+    /// multi-row `INSERT` that hits a duplicate key partway through has already
+    /// written the rows before it. So a bare server error here is *not*
+    /// evidence that nothing landed.
     ///
-    /// Deadlocks are the useful exception. InnoDB rolls the victim's transaction
-    /// back before reporting, so a deadlock is both transient *and* certainly not
-    /// applied — which is what makes it the one failure worth retrying
-    /// automatically.
+    /// Deadlock and lock-wait timeout are the exceptions, and they are
+    /// exceptions for a reason rather than by convention: InnoDB rolls the
+    /// victim's transaction back before reporting either one. They are both
+    /// transient and certainly not applied, which is the conjunction
+    /// ``SQLDiagnosable/isSafeToRetry`` needs.
+    ///
+    /// An execution timeout is deliberately **not** on that list, which is the
+    /// opposite of the Postgres driver's treatment of `57014`. Postgres cancels
+    /// a statement by aborting it, so nothing applied. MariaDB's
+    /// `max_statement_time` is not restricted to `SELECT`, and neither it nor a
+    /// `KILL QUERY` can promise a non-transactional table was left alone — so
+    /// the conservative answer is the correct one here even though it is the
+    /// wrong one there.
     public var mayHaveApplied: Bool {
         switch self {
         case .server(let code, _, _):

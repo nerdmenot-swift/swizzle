@@ -149,6 +149,11 @@ extension MySQLValue {
     ) -> MySQLValue {
         // Exact numerics and anything byte-shaped stay as raw bytes, which is
         // the one case that has to allocate anyway.
+        // `isExactNumeric` is presently a subset of `isBinaryEncodedAsBytes`,
+        // so this reads as redundant and no test can kill dropping it — the
+        // default arm below returns the same bytes. It stays because "DECIMAL
+        // never becomes a Double" is an invariant of its own, and should not
+        // rest on decimal happening to appear in another predicate's list.
         if type.isExactNumeric || type.isBinaryEncodedAsBytes {
             return .bytes(buffer.rawBytes)
         }

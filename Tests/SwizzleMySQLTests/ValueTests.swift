@@ -534,6 +534,46 @@ struct TextParsingEdgeTests {
         }
         #expect(MySQLValue.render(value) == text)
     }
+
+    /// `TIME` renders as MySQL prints it, which is not a clock: it is a signed
+    /// duration whose hour field runs past 24 and past 100.
+    ///
+    /// The fractional part appears **only when non-zero**, matching the server —
+    /// `SELECT CAST('01:00:00' AS CHAR)` is `01:00:00`, not `01:00:00.000000`.
+    /// Appending it unconditionally would make every value that goes back into a
+    /// statement differ textually from what came out.
+    @Test("TIME renders its fraction only when it has one", arguments: [
+        (MySQLTime(), "00:00:00"),
+        (MySQLTime(hours: 1), "01:00:00"),
+        (MySQLTime(hours: 1, minutes: 2, seconds: 3), "01:02:03"),
+        (MySQLTime(microseconds: 1), "00:00:00.000001"),
+        (MySQLTime(hours: 1, microseconds: 500_000), "01:00:00.500000"),
+        (MySQLTime(isNegative: true, hours: 1, minutes: 2, seconds: 3), "-01:02:03"),
+        (MySQLTime(isNegative: true, microseconds: 1), "-00:00:00.000001"),
+        // Past a day, where `days` carries the overflow and `totalHours`
+        // is what the text shows.
+        (MySQLTime(days: 1), "24:00:00"),
+        (MySQLTime(days: 34, hours: 22, minutes: 59, seconds: 59), "838:59:59"),
+        (MySQLTime(isNegative: true, days: 34, hours: 22, minutes: 59, seconds: 59),
+         "-838:59:59"),
+    ])
+    func timeRendering(value: MySQLTime, text: String) {
+        #expect(MySQLValue.render(value) == text)
+    }
+
+    /// The same for DATETIME, whose fraction follows the same rule.
+    @Test("DATETIME renders its fraction only when it has one", arguments: [
+        (MySQLDateTime(year: 2024, month: 3, day: 5), "2024-03-05 00:00:00"),
+        (MySQLDateTime(year: 2024, month: 3, day: 5, hour: 14, minute: 30, second: 7),
+         "2024-03-05 14:30:07"),
+        (MySQLDateTime(year: 2024, month: 3, day: 5, microsecond: 1),
+         "2024-03-05 00:00:00.000001"),
+        (MySQLDateTime(year: 999, month: 1, day: 2), "0999-01-02 00:00:00"),
+        (MySQLDateTime(), "0000-00-00 00:00:00"),
+    ])
+    func dateTimeRendering(value: MySQLDateTime, text: String) {
+        #expect(MySQLValue.render(value) == text)
+    }
 }
 
 /// Decoding a column into `Bool`, which has no MySQL type of its own.
