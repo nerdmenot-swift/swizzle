@@ -61,6 +61,11 @@ public enum MySQLBinlogRowDecoder {
             // document would be. The partial bitmap is indexed by JSON-column
             // ordinal, not by column position, so the two are counted apart.
             if type == MySQLColumnType.json.rawValue, !partialJSONColumns.isEmpty {
+                // The inner bound is unreachable and cannot be killed by any
+                // test: this branch needs `type` to be JSON, which only happens
+                // when `column < columnTypes.count`, so `earlier` never reaches
+                // the count. It stays because the two bounds are read together
+                // and one of them being load-bearing is not obvious.
                 let jsonOrdinal = (0..<column).reduce(into: 0) { total, earlier in
                     if earlier < table.columnTypes.count,
                        table.columnTypes[earlier] == MySQLColumnType.json.rawValue {
@@ -244,6 +249,11 @@ public enum MySQLBinlogRowDecoder {
         case .set:
             let bytes = try need(max(length, 1))
             var raw: UInt64 = 0
+            // A SET holds at most 64 members, so at most eight bytes. The
+            // guard is belt-and-braces rather than load-bearing: Swift's shift
+            // is a smart shift, so a ninth byte would shift by 64 and
+            // contribute zero anyway. Mutating it away changes nothing, which
+            // is why no test kills it.
             for (index, byte) in bytes.enumerated() where index < 8 {
                 raw |= UInt64(byte) << (8 * index)
             }

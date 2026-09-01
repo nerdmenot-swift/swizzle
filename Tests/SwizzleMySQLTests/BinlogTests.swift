@@ -433,6 +433,253 @@ struct BinlogRowDecodingTests {
         #expect(MySQLBinlogRowDecoder.fractionalByteCount(precision) == expected)
     }
 
+    // MARK: - When the table map and the row event disagree
+
+    /// A row event carries **no schema** — it cites a table id, and the decoder
+    /// looks up a map it cached from an earlier event. Nothing on the wire
+    /// guarantees the two agree about how many columns there are: the server
+    /// mints a new table id whenever a definition re-enters its cache, a stream
+    /// can be resumed from a position that lands after the map, and a consumer
+    /// can be fed a map from a different table entirely.
+    ///
+    /// So the decoder bounds-checks the map on every column rather than
+    /// trusting the count. Those checks are unreachable while the two agree,
+    /// which is why every one of them survived the mutation sweep.
+    @Test("a row event citing more columns than the table map describes does not trap")
+    func rowWiderThanTheTableMap() throws {
+        // The map knows about one column; the event claims five.
+        let map = Self.table(types: [MySQLColumnType.long.rawValue], metadata: [0])
+        var buffer = ByteBuffer()
+        buffer.writeBytes([0x00])                                  // null bitmap
+        buffer.writeBytes([0x07, 0x00, 0x00, 0x00])                // the one real column
+        buffer.writeBytes([UInt8](repeating: 0x41, count: 32))     // and then whatever
+
+        // Throwing is a correct outcome — the image cannot be decoded. Trapping
+        // on an out-of-range subscript is not.
+        _ = try? MySQLBinlogRowDecoder.decodeRow(
+            &buffer, table: map, presentColumns: [0x1F], columnCount: 5
+        )
+    }
+
+    /// The same when only the *metadata* is short, which is a distinct array
+    /// and a distinct bounds check.
+    @Test("a table map with fewer metadata entries than types does not trap")
+    func metadataShorterThanTypes() throws {
+        let map = MySQLTableMapEvent(
+            tableID: 1, schema: "test", table: "t",
+            columnTypes: [UInt8](repeating: MySQLColumnType.varString.rawValue, count: 4),
+            columnMetadata: [16],                                  // one entry for four columns
+            nullableColumns: [Bool](repeating: true, count: 4)
+        )
+        var buffer = ByteBuffer()
+        buffer.writeBytes([0x00])
+        buffer.writeBytes([0x02, 0x61, 0x62])                      // "ab"
+        buffer.writeBytes([UInt8](repeating: 0x00, count: 16))
+
+        _ = try? MySQLBinlogRowDecoder.decodeRow(
+            &buffer, table: map, presentColumns: [0x0F], columnCount: 4
+        )
+    }
+
+    /// The partial-JSON bitmap is indexed by JSON-column ordinal, which is a
+    /// different number from the column position — so it has its own length and
+    /// its own check.
+    @Test("a partial-JSON bitmap shorter than the JSON column count does not trap")
+    func shortPartialJSONBitmap() throws {
+        let map = Self.table(
+            types: [UInt8](repeating: MySQLColumnType.json.rawValue, count: 20),
+            metadata: [UInt16](repeating: 4, count: 20)
+        )
+        var buffer = ByteBuffer()
+        buffer.writeBytes([0x00, 0x00, 0x00])                      // null bitmap
+        buffer.writeBytes([UInt8](repeating: 0x00, count: 64))
+
+        // Twenty JSON columns need three bitmap bytes; one is supplied.
+        _ = try? MySQLBinlogRowDecoder.decodeRow(
+            &buffer, table: map, presentColumns: [0xFF, 0xFF, 0x0F],
+            columnCount: 20, partialJSONColumns: [0xFF]
+        )
+    }
+
+    // MARK: - Metadata-driven widths
+
+    /// A `VARCHAR` length prefix is **one byte below 256 and two at or above**,
+    /// decided by the column's declared maximum rather than by anything in the
+    /// row image. Get it wrong and the value is misread *and* every column after
+    /// it is misaligned, so the sentinel is what actually catches it.
+    @Test("the VARCHAR length prefix widens at exactly 256",
+          arguments: [MySQLColumnType.varString, .varchar])
+    func varcharLengthPrefixBoundary(type: MySQLColumnType) throws {
+        let narrow = Self.table(types: [type.rawValue, MySQLColumnType.long.rawValue],
+                                metadata: [255, 0])
+        var narrowBuffer = ByteBuffer()
+        narrowBuffer.writeBytes([0x00])
+        narrowBuffer.writeBytes([0x03, 0x61, 0x62, 0x63])          // "abc"
+        narrowBuffer.writeBytes([0x39, 0x30, 0x00, 0x00])          // sentinel 12345
+        let narrowValues = try MySQLBinlogRowDecoder.decodeRow(
+            &narrowBuffer, table: narrow, presentColumns: [0x03], columnCount: 2
+        )
+        #expect(narrowValues[0].string == "abc", "\(type) at 255")
+        #expect(narrowValues[1].int == 12_345, "\(type) at 255 consumed the wrong width")
+
+        // Declared maximum 256: two length bytes.
+        let wide = Self.table(types: [type.rawValue, MySQLColumnType.long.rawValue],
+                              metadata: [256, 0])
+        var wideBuffer = ByteBuffer()
+        wideBuffer.writeBytes([0x00])
+        wideBuffer.writeBytes([0x03, 0x00, 0x61, 0x62, 0x63])      // "abc", two-byte length
+        wideBuffer.writeBytes([0x39, 0x30, 0x00, 0x00])
+        let wideValues = try MySQLBinlogRowDecoder.decodeRow(
+            &wideBuffer, table: wide, presentColumns: [0x03], columnCount: 2
+        )
+        #expect(wideValues[0].string == "abc", "\(type) at 256")
+        #expect(wideValues[1].int == 12_345, "\(type) at 256 consumed the wrong width")
+    }
+
+
+    /// A `CHAR` longer than 255 cannot say so in the metadata's low byte, and
+    /// the high byte is already spoken for by the type overload. MySQL encodes
+    /// the two extra length bits **into the type byte itself**, xored into the
+    /// `0x30` mask — so the type byte of a wide CHAR is not a valid column type
+    /// at all, and the decoder must recover the length from it rather than
+    /// treating the column as an unknown type.
+    ///
+    /// `metadata = (0xFE ^ ((length & 0x300) >> 4)) << 8 | (length & 0xFF)`
+    @Test("a CHAR longer than 255 recovers its length from the type byte")
+    func wideCharLengthFromTypeByte() throws {
+        for length in [256, 300, 511, 512, 767] {
+            let typeByte = UInt16(MySQLColumnType.string.rawValue) ^ UInt16((length & 0x300) >> 4)
+            let packed = typeByte << 8 | UInt16(length & 0xFF)
+            let map = Self.table(
+                types: [MySQLColumnType.string.rawValue, MySQLColumnType.long.rawValue],
+                metadata: [packed, 0]
+            )
+            var buffer = ByteBuffer()
+            buffer.writeBytes([0x00])
+            buffer.writeBytes([0x03, 0x00, 0x61, 0x62, 0x63])      // "abc", two-byte length
+            buffer.writeBytes([0x39, 0x30, 0x00, 0x00])            // sentinel
+            let values = try MySQLBinlogRowDecoder.decodeRow(
+                &buffer, table: map, presentColumns: [0x03], columnCount: 2
+            )
+            #expect(values[0].string == "abc", "CHAR(\(length))")
+            #expect(
+                values[1].int == 12_345,
+                "CHAR(\(length)) read the wrong prefix width, so the next column moved"
+            )
+        }
+    }
+
+    /// `MYSQL_TYPE_STRING` is overloaded: for `ENUM`, `SET` and `CHAR` the real
+    /// type is packed into the **high byte** of the metadata and the low byte
+    /// carries the length. Read as a plain string it yields garbage for every
+    /// ENUM column, which is a wrong value rather than an error.
+    @Test("an ENUM arrives as a STRING with its real type packed into the metadata")
+    func enumPackedIntoStringMetadata() throws {
+        let packed = UInt16(MySQLColumnType.enumeration.rawValue) << 8 | 1
+        let map = Self.table(
+            types: [MySQLColumnType.string.rawValue, MySQLColumnType.long.rawValue],
+            metadata: [packed, 0]
+        )
+        var buffer = ByteBuffer()
+        buffer.writeBytes([0x00])
+        buffer.writeBytes([0x02])                                  // the second ENUM member
+        buffer.writeBytes([0x39, 0x30, 0x00, 0x00])                // sentinel
+        let values = try MySQLBinlogRowDecoder.decodeRow(
+            &buffer, table: map, presentColumns: [0x03], columnCount: 2
+        )
+        #expect(values[0].int == 2, "decoded as \(values[0]) rather than an ENUM index")
+        #expect(values[1].int == 12_345, "the ENUM consumed the wrong number of bytes")
+    }
+
+    /// A metadata word below 256 means a plain `CHAR`, so the overload must not
+    /// fire — the boundary between the two readings.
+    @Test("a STRING with metadata below 256 stays a plain string")
+    func stringMetadataBelowTheOverload() throws {
+        let map = Self.table(types: [MySQLColumnType.string.rawValue], metadata: [255])
+        var buffer = ByteBuffer()
+        buffer.writeBytes([0x00])
+        buffer.writeBytes([0x02, 0x68, 0x69])                      // "hi"
+        let values = try MySQLBinlogRowDecoder.decodeRow(
+            &buffer, table: map, presentColumns: [0x01], columnCount: 1
+        )
+        #expect(values[0].string == "hi")
+    }
+
+
+    /// The JSON-ordinal count walks *every earlier column* to work out which
+    /// bit of the partial bitmap belongs to this one — so it indexes the type
+    /// array with positions that may run past it when the map is short. That is
+    /// a second bounds check on the same array, reached only when the row is
+    /// wider than the map **and** a JSON column is flagged partial.
+    @Test("counting JSON ordinals past the end of a short table map does not trap")
+    func jsonOrdinalPastTheTableMap() throws {
+        // Two columns described, five claimed, and a partial-JSON bitmap that
+        // makes the ordinal walk run.
+        let map = Self.table(
+            types: [MySQLColumnType.json.rawValue, MySQLColumnType.json.rawValue],
+            metadata: [4, 4]
+        )
+        var buffer = ByteBuffer()
+        buffer.writeBytes([0x00])
+        buffer.writeBytes([UInt8](repeating: 0x00, count: 48))
+
+        _ = try? MySQLBinlogRowDecoder.decodeRow(
+            &buffer, table: map, presentColumns: [0x1F], columnCount: 5,
+            partialJSONColumns: [0xFF]
+        )
+    }
+
+    /// The `MYSQL_TYPE_STRING` overload fires on a **non-zero high byte**, not
+    /// on a length of 256 — the two coincide numerically and mean different
+    /// things. A column whose metadata is exactly 256 has a real type packed
+    /// into it and is not a 256-byte string.
+    @Test("the STRING overload turns on the high byte, at exactly 256")
+    func stringOverloadBoundary() throws {
+        // 256 packs real type 1 with a low byte of zero. Whatever that decodes
+        // as, it must not read the two-byte length prefix a 256-wide string
+        // would — the sentinel is what says which reading happened.
+        let map = Self.table(
+            types: [MySQLColumnType.string.rawValue, MySQLColumnType.long.rawValue],
+            metadata: [256, 0]
+        )
+        var buffer = ByteBuffer()
+        buffer.writeBytes([0x00])
+        buffer.writeBytes([0x07])                                  // one byte, not a prefix
+        buffer.writeBytes([0x39, 0x30, 0x00, 0x00])                // sentinel 12345
+        let values = try MySQLBinlogRowDecoder.decodeRow(
+            &buffer, table: map, presentColumns: [0x03], columnCount: 2
+        )
+        #expect(
+            values[1].int == 12_345,
+            "metadata 256 was read as a string width rather than as a packed type"
+        )
+    }
+
+    // MARK: - Truncated packed decimals
+
+    /// The packed decimal reader stops at the end of its buffer rather than
+    /// indexing past it. A row image can be short for the same reasons any other
+    /// field can, and the width here is computed from the *declared* precision
+    /// rather than from the bytes present.
+    @Test("a packed decimal shorter than its precision implies does not read past the end")
+    func truncatedPackedDecimal() {
+        for precision in [10, 20, 38, 65] {
+            for scale in [0, 2, 6, 9] where scale <= precision {
+                let full = MySQLBinlogRowDecoder.decimalByteCount(
+                    precision: precision, scale: scale
+                )
+                for supplied in 0...full {
+                    // Any string is acceptable — the input is truncated and the
+                    // value is meaningless. Returning one is the property.
+                    _ = MySQLBinlogRowDecoder.decodeDecimal(
+                        [UInt8](repeating: 0xFF, count: supplied),
+                        precision: precision, scale: scale
+                    )
+                }
+            }
+        }
+    }
+
     /// The pre-5.6 `TIME` format, whose three bytes are **signed**.
     ///
     /// The decoder assembled them as unsigned, which made its own `isNegative`
