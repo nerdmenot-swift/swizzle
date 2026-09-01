@@ -100,10 +100,21 @@ public enum MySQLSessionTimeZone: Sendable, Equatable {
     /// for ``utc`` and ``offset(hours:minutes:)``.
     public var offsetFromUTC: TimeInterval? {
         switch self {
-        case .server, .named: nil
-        case .utc: 0
+        case .server, .named: return nil
+        case .utc: return 0
         case .offset(let hours, let minutes):
-            TimeInterval(hours * 3600 + (hours < 0 ? -1 : 1) * abs(minutes) * 60)
+            // The sign rule has to be *the same one* `settingValue` uses, or
+            // the driver tells the server one offset and converts by another.
+            // It did: with `hours` zero and `minutes` negative — a legal offset
+            // MySQL accepts — the statement said `-00:30` while this returned
+            // +1800, so every TIMESTAMP came back an hour the wrong side of
+            // where the session had been set.
+            //
+            // Deriving both from "is either component negative" keeps them in
+            // step. Every other combination is unchanged.
+            let isNegative = hours < 0 || minutes < 0
+            let magnitude = abs(hours) * 3600 + abs(minutes) * 60
+            return TimeInterval(isNegative ? -magnitude : magnitude)
         }
     }
 
