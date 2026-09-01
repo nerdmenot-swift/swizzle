@@ -367,7 +367,21 @@ public enum MySQLBinlogRowDecoder {
         // binlog suites, reading the same server's log concurrently, met one.
         case .time:
             let bytes = try need(3)
+            // The field is **signed** 24-bit, and assembling it as unsigned made
+            // the `isNegative` test below dead code: a negative TIME decoded as
+            // a large positive one, so `-12:34:56` came back as `69 09:56:00`.
+            //
+            // That the field is signed is settled by its own range. The largest
+            // legal TIME, `838:59:59`, packs to 8385959 — just under 2^23. If
+            // the field were unsigned, that headroom would have no purpose; it
+            // is there because the range is symmetric about zero, and MySQL
+            // stores the negation of the magnitude for a negative time.
+            //
+            // `rust-mysql-common` reads it unsigned and hardcodes the sign to
+            // false, so it carries the same defect. Recorded as a divergence in
+            // docs/mysql-protocol-checklist.md.
             var packed = Int(bytes[0]) | (Int(bytes[1]) << 8) | (Int(bytes[2]) << 16)
+            if packed >= 0x80_0000 { packed -= 0x100_0000 }
             let isNegative = packed < 0
             if isNegative { packed = -packed }
             let totalHours = packed / 10_000

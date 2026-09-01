@@ -432,6 +432,80 @@ struct BinlogRowDecodingTests {
     func fractionalSecondWidths(precision: Int, expected: Int) {
         #expect(MySQLBinlogRowDecoder.fractionalByteCount(precision) == expected)
     }
+
+    /// The pre-5.6 `TIME` format, whose three bytes are **signed**.
+    ///
+    /// The decoder assembled them as unsigned, which made its own `isNegative`
+    /// test dead code — a negative time came back as a large positive one, so
+    /// `-12:34:56` decoded as `69 09:56:00`. The mutation sweep found it by
+    /// pointing at a comparison that could never be true.
+    ///
+    /// That the field is signed follows from its range. The largest legal
+    /// `TIME`, `838:59:59`, packs to 8385959, just under 2^23 — headroom that
+    /// only makes sense if the top bit is a sign. `rust-mysql-common` reads it
+    /// unsigned and hardcodes the sign to false, so it carries the same defect;
+    /// this is a deliberate divergence.
+    ///
+    /// The format only appears in binlogs written before 5.6, which no fixture
+    /// here can produce, so it is exercised from constructed bytes rather than
+    /// from a server.
+    @Test(
+        "the pre-5.6 TIME format carries a sign",
+        arguments: [
+            // bytes (little-endian 24-bit), negative, days, hours, minutes, seconds
+            ([UInt8](arrayLiteral: 0x00, 0x00, 0x00), false, UInt32(0), UInt8(0), UInt8(0), UInt8(0)),
+            ([0x40, 0xE2, 0x01], false, 0, 12, 34, 56),   //  123456 →  12:34:56
+            ([0xC0, 0x1D, 0xFE], true, 0, 12, 34, 56),    // -123456 → -12:34:56
+            ([0xA7, 0xF5, 0x7F], false, 34, 22, 59, 59),  //  838:59:59, the maximum
+            ([0x59, 0x0A, 0x80], true, 34, 22, 59, 59),   // -838:59:59, the minimum
+            ([0xFF, 0xFF, 0xFF], true, 0, 0, 0, 1),       // -1 → -00:00:01
+        ]
+    )
+    func oldTimeFormatIsSigned(
+        bytes: [UInt8], negative: Bool, days: UInt32, hours: UInt8,
+        minutes: UInt8, seconds: UInt8
+    ) throws {
+        let map = Self.table(types: [MySQLColumnType.time.rawValue], metadata: [0])
+        var buffer = ByteBuffer()
+        buffer.writeBytes([0x00])                                  // null bitmap
+        buffer.writeBytes(bytes)
+
+        let values = try MySQLBinlogRowDecoder.decodeRow(
+            &buffer, table: map, presentColumns: [0x01], columnCount: 1
+        )
+        guard case .time(let time) = values[0] else {
+            Issue.record("expected a TIME, got \(values[0])")
+            return
+        }
+        #expect(time.isNegative == negative)
+        #expect(time.days == days)
+        #expect(time.hours == hours)
+        #expect(time.minutes == minutes)
+        #expect(time.seconds == seconds)
+    }
+
+    /// No three-byte value may trap, whatever it means. The sign extension
+    /// makes half the space negative, and the negation that follows is where an
+    /// unguarded implementation would overflow.
+    @Test("no three-byte TIME value traps the decoder")
+    func everyOldTimeValueIsSafe() throws {
+        let map = Self.table(types: [MySQLColumnType.time.rawValue], metadata: [0])
+        // The whole 24-bit space is 16.7M decodes, which is too slow for every
+        // run; this walks it in strides that land on both sides of the sign
+        // boundary and on the extremes.
+        for raw in stride(from: 0, to: 0x100_0000, by: 0x2AB) {
+            var buffer = ByteBuffer()
+            buffer.writeBytes([0x00])
+            buffer.writeBytes([
+                UInt8(raw & 0xFF), UInt8((raw >> 8) & 0xFF), UInt8((raw >> 16) & 0xFF),
+            ])
+            // Throwing is fine — the value may be out of MySQL's own range.
+            // Trapping is not.
+            _ = try? MySQLBinlogRowDecoder.decodeRow(
+                &buffer, table: map, presentColumns: [0x01], columnCount: 1
+            )
+        }
+    }
 }
 
 /// Lifetime of the decoder's table-map cache.

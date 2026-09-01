@@ -253,7 +253,9 @@ public enum MySQLJSONB {
     /// where `ymd = ((year * 13 + month) << 5) | day` and
     /// `hms = (hour << 12) | (minute << 6) | second`.
     private static func unpackDateTime(_ packed: Int64) -> MySQLDateTime {
-        let magnitude = packed < 0 ? -packed : packed
+        // `.magnitude` rather than `-packed`: negating Int64.min overflows and
+        // traps, and `packed` is eight bytes read straight from the document.
+        let magnitude = packed.magnitude
         let fraction = magnitude % (1 << 24)
         let ymdhms = magnitude >> 24
         let ymd = ymdhms >> 17
@@ -275,7 +277,7 @@ public enum MySQLJSONB {
     /// duration and runs past 24.
     private static func unpackTime(_ packed: Int64) -> MySQLTime {
         let isNegative = packed < 0
-        let magnitude = isNegative ? -packed : packed
+        let magnitude = packed.magnitude          // never negate: Int64.min traps
         let fraction = magnitude % (1 << 24)
         let hms = magnitude >> 24
         let totalHours = UInt32(truncatingIfNeeded: (hms >> 12) % (1 << 10))
@@ -328,6 +330,15 @@ public enum MySQLJSONB {
         return value
     }
 
+    /// Every read in this decoder goes through here first.
+    ///
+    /// The `end >= 0` half is unreachable today — every offset originates in an
+    /// unsigned read and only ever has non-negative amounts added to it — and no
+    /// test kills a mutation of it, because there is no document that makes it
+    /// fire. It stays because the cost is one comparison and the failure it
+    /// guards against is reading backwards out of the buffer, which is the kind
+    /// of thing a later change to how offsets are computed would reintroduce
+    /// silently.
     private static func require(_ bytes: [UInt8], _ end: Int) throws {
         guard end <= bytes.count, end >= 0 else {
             throw MySQLProtocolError.malformedPacket(

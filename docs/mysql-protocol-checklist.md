@@ -1049,3 +1049,36 @@ the mode verifies rather than refuses.
 `ClientBootstrap` sets it by default, so both our drivers already had it. Worth
 recording that it was checked rather than assumed — the cost of being wrong is a
 40 ms Nagle delay on every small write.
+
+### A divergence from `rust-mysql-common`: the pre-5.6 `TIME` is signed
+
+Found by the mutation sweep, which flagged a comparison that could never be
+true. `BinlogRowDecoder` assembled the old `MYSQL_TYPE_TIME` row image from its
+three bytes as **unsigned**, which made the `isNegative` test immediately below
+it dead code. A negative time therefore decoded as a large positive one:
+`-00:00:01` came back as `69 09:56:00`, and `-12:34:56` as `69 09:56:00` — a
+plausible-looking value, not an error.
+
+The reference does the same thing. `references/rust-mysql-common/src/binlog/
+value.rs:100` reads the field as `RawInt<LeU24>` and passes `false` for the sign
+unconditionally, so it carries the identical defect. This is the second time
+a reference has been wrong in the same place we were — and the second time
+copying it faithfully would have preserved the bug rather than avoided it.
+
+That the field is signed is settled by its own range, which is the kind of
+evidence that does not depend on any implementation: the largest legal `TIME`
+is `838:59:59`, which packs to `838 * 10000 + 59 * 100 + 59` = 8385959 — just
+under 2^23. Unsigned, that headroom has no purpose. Signed, it is exactly a
+symmetric range about zero, which is what a duration type needs.
+
+Reachability is narrow: the format only appears in binlogs written before 5.6,
+or where `avoid_temporal_upgrade` preserved an old column definition. No fixture
+here can produce one, so the decoding is exercised from constructed bytes in
+`BinlogTests.oldTimeFormatIsSigned`, with the byte values derived from the
+format rather than from our own encoder.
+
+Same sweep, same file, a second finding: `JSONBDecoder` took a packed temporal's
+magnitude with `packed < 0 ? -packed : packed`. Negating `Int64.min` overflows
+and **traps** — and `packed` is eight bytes read straight out of a JSON document
+in a row image, so `00 00 00 00 00 00 00 80` from any peer took the process
+down. Now `packed.magnitude`, which is a `UInt64` and has no such edge.
