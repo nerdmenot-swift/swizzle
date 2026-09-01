@@ -198,7 +198,7 @@ extension MySQLRow {
 
     /// Decodes one column by position.
     public func decode<T: MySQLDecodable>(_ type: T.Type, at index: Int) throws -> T {
-        guard index < values.count else {
+        guard index >= 0, index < values.count else {
             throw MySQLDecodingError(
                 column: index, columnName: nil, expected: "\(T.self)", actual: .null
             )

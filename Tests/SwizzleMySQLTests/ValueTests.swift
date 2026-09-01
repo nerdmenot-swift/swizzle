@@ -535,3 +535,81 @@ struct TextParsingEdgeTests {
         #expect(MySQLValue.render(value) == text)
     }
 }
+
+/// Decoding a column into `Bool`, which has no MySQL type of its own.
+///
+/// `BOOL` and `BOOLEAN` are spellings of `TINYINT(1)`, so the value arrives as
+/// an integer and "non-zero is true" is exactly what the server does. That part
+/// is unambiguous.
+///
+/// The byte-shaped arm is not, and the boundary is worth stating because it
+/// cannot be resolved where the decoding happens.
+@Suite("Bool decoding")
+struct BoolDecodingTests {
+
+    @Test("a signed integer is true when non-zero")
+    func signedIntegers() throws {
+        #expect(try Bool(mysqlValue: .int(0)) == false)
+        #expect(try Bool(mysqlValue: .int(1)) == true)
+        #expect(try Bool(mysqlValue: .int(-1)) == true, "non-zero, not positive")
+        #expect(try Bool(mysqlValue: .int(2)) == true)
+        #expect(try Bool(mysqlValue: .int(.min)) == true)
+        #expect(try Bool(mysqlValue: .int(.max)) == true)
+    }
+
+    @Test("an unsigned integer is true when non-zero")
+    func unsignedIntegers() throws {
+        #expect(try Bool(mysqlValue: .uint(0)) == false)
+        #expect(try Bool(mysqlValue: .uint(1)) == true)
+        #expect(try Bool(mysqlValue: .uint(.max)) == true)
+    }
+
+    /// A single byte is how `BIT(1)` arrives — 0x00 or 0x01 — and the rule that
+    /// works for it is the same non-zero rule.
+    @Test("a single byte is true when non-zero")
+    func singleByte() throws {
+        #expect(try Bool(mysqlValue: .bytes([0x00])) == false)
+        #expect(try Bool(mysqlValue: .bytes([0x01])) == true)
+        #expect(try Bool(mysqlValue: .bytes([0xFF])) == true)
+    }
+
+    /// **A known ambiguity, pinned so a change to it is deliberate.**
+    ///
+    /// `BIT(8)` holding 48 and `CHAR(1)` holding `'0'` are the *same value* by
+    /// the time they reach here: `.bytes([0x30])`. MySQL evaluates them
+    /// oppositely — the bit field is 48, which is true; the string `'0'`
+    /// converts to the number 0, which is false — and nothing in `MySQLValue`
+    /// distinguishes them, because `MySQLDecodable` is handed a value and not
+    /// the column it came from.
+    ///
+    /// So this is not a decision the decoder can get right. It takes the bit
+    /// field reading, which is correct for `BIT` and wrong for a legacy
+    /// `CHAR(1)` flag column storing `'0'` — that decodes as `true`.
+    ///
+    /// Resolving it means widening the protocol to carry the column type, which
+    /// is an API change rather than a fix, so it is recorded here rather than
+    /// guessed at.
+    @Test("an ASCII digit byte takes the bit-field reading, not the string one")
+    func asciiDigitIsAmbiguous() throws {
+        #expect(
+            try Bool(mysqlValue: .bytes([0x30])) == true,
+            "ASCII '0' is a non-zero byte; MySQL would read the string as false"
+        )
+        #expect(try Bool(mysqlValue: .bytes([0x31])) == true)
+    }
+
+    /// Anything that is not one of those shapes throws rather than guessing —
+    /// including a multi-byte string, which is where a caller who wanted the
+    /// string reading would find out.
+    @Test("other shapes throw rather than guessing")
+    func otherShapesThrow() {
+        for value: MySQLValue in [
+            .null, .bytes([]), .bytes([0x30, 0x30]), .bytes(Array("true".utf8)),
+            .double(1), .float(1), .dateTime(.init()), .time(.init()),
+        ] {
+            #expect(throws: MySQLDecodingError.self, "\(value)") {
+                try Bool(mysqlValue: value)
+            }
+        }
+    }
+}

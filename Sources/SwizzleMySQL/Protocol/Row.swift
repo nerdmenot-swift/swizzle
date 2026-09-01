@@ -73,7 +73,7 @@ public struct MySQLRow: Sendable, Equatable {
     }
 
     public subscript(index: Int) -> MySQLValue {
-        index < values.count ? values[index] : .null
+        index >= 0 && index < values.count ? values[index] : .null
     }
 
     /// Column lookup by name. Returns nil when there is no such column, which is
