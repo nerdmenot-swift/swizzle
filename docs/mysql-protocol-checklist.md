@@ -1112,3 +1112,30 @@ The lesson is about the *shape* rather than the site. Anywhere a width comes off
 the wire and is converted before being compared, the comparison is decoration.
 `Tests/SwizzleMySQLTests/WireLengthBoundsTests.swift` groups these by defect
 rather than by component, so a new call site has an obvious place to be tested.
+
+### A rows event that never finishes
+
+`decodeRows` walks its rows with `while body.readableBytes > 0`, and
+`MySQLBinlogRowDecoder.decodeRow` consumes **nothing** when no column is
+present: a zero column count, or a present-bitmap with no bits set, makes the
+null bitmap zero bytes wide and leaves the per-column loop empty. Both numbers
+come off the wire.
+
+One malformed event therefore spun that loop forever, appending empty rows to an
+array that grew without bound — a hang *and* an unbounded allocation, on a
+replication consumer, which is the one client that can neither skip the event
+nor pause the stream.
+
+Found sideways. A mutation of the v1/v2 version test made the suite stop
+finishing rather than start failing, and the first assumption was a slow
+machine. Two things came out of chasing it:
+
+- **A test that hangs is a test result.** The sweep counts hangs as kills, so
+  this shape can hide behind a green-looking score; a mutant that hangs the
+  suite is worth reading, not just tallying.
+- **Loops driven by a peer's length must be shown to make progress.** The guard
+  is a comparison of the reader index before and after, which is cheap and does
+  not depend on any reasoning about which shapes consume bytes.
+
+Confirmed by removing the guard and bounding the run: the filtered suite passes
+in 9 ms with it and is still going after 60 seconds without it.

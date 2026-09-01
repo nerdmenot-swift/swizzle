@@ -906,6 +906,14 @@ public struct MySQLBinlogEventDecoder: Sendable {
         let partialBitmapBytes = (jsonColumnCount + 7) / 8
 
         while body.readableBytes > 0 {
+            // **A row must consume bytes.** `decodeRow` legitimately reads
+            // nothing when no column is present — a zero column count, or a
+            // present-bitmap with no bits set, makes the null bitmap zero bytes
+            // wide and the per-column loop empty. Both numbers come off the
+            // wire, so a peer can choose them, and without this the loop spins
+            // forever appending empty rows: a hang and an unbounded allocation
+            // from one malformed event, on the one client that must not die.
+            let progressMark = body.readerIndex
             let before = try MySQLBinlogRowDecoder.decodeRow(
                 &body, table: map, presentColumns: beforeBitmap, columnCount: Int(columnCount)
             )
@@ -950,8 +958,14 @@ public struct MySQLBinlogEventDecoder: Sendable {
                 )
                 updated.append(after)
             }
-        }
 
+            guard body.readerIndex > progressMark else {
+                throw MySQLProtocolError.malformedPacket(
+                    "binlog: rows event makes no progress — \(columnCount) columns, "
+                        + "no column present in the image"
+                )
+            }
+        }
         return MySQLRowsEvent(
             kind: kind,
             tableID: tableID,
