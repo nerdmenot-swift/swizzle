@@ -191,3 +191,91 @@ struct RowIndexingTests {
     }
 
 }
+
+/// When two rows are the same row.
+///
+/// ## Why identity is deliberately not the answer
+///
+/// A row holds its values and a *reference* to a schema. Two executions of the
+/// same query produce two schema objects describing the same columns, so
+/// comparing schemas by identity would make every row unequal to a row from an
+/// earlier run — which is exactly what a test asserting an expected result set
+/// needs to do.
+///
+/// So equality is values **and** column names, with schema identity as a fast
+/// path rather than as the rule. That is three conditions in one expression, and
+/// nothing exercised the shape of it: the mutation sweep left all four operators
+/// alive because every test compared rows that shared a schema object.
+@Suite("MySQL row equality")
+struct RowEqualityTests {
+
+    static func column(_ name: String) -> MySQLColumnDefinition {
+        RowIndexingTests.column(name)
+    }
+
+    static func row(_ values: [MySQLValue], _ names: [String]) -> MySQLRow {
+        MySQLRow(values: values, columns: names.map(Self.column))
+    }
+
+    /// **The property the fast path exists to avoid breaking.** Two rows built
+    /// from separate schema objects describing the same columns are equal.
+    @Test("rows from separate executions of the same query are equal")
+    func separateSchemasCompareEqual() {
+        let first = Self.row([.int(1), .bytes(Array("a".utf8))], ["id", "name"])
+        let second = Self.row([.int(1), .bytes(Array("a".utf8))], ["id", "name"])
+        #expect(first.schema !== second.schema, "the premise: two distinct schema objects")
+        #expect(first == second)
+    }
+
+    /// Sharing a schema object is the fast path, and must give the same answer.
+    @Test("rows sharing a schema compare on their values")
+    func sharedSchema() {
+        let schema = MySQLRowSchema(["id", "name"].map(Self.column))
+        let first = MySQLRow(values: [.int(1), .null], schema: schema)
+        let second = MySQLRow(values: [.int(1), .null], schema: schema)
+        let third = MySQLRow(values: [.int(2), .null], schema: schema)
+        #expect(first == second)
+        #expect(first != third, "same schema, different values")
+    }
+
+    /// Different values are never equal, whatever the schemas.
+    @Test("different values are not equal")
+    func differentValues() {
+        #expect(Self.row([.int(1)], ["id"]) != Self.row([.int(2)], ["id"]))
+        #expect(Self.row([.int(1)], ["id"]) != Self.row([.null], ["id"]))
+        #expect(Self.row([.int(1)], ["id"]) != Self.row([.int(1), .int(2)], ["id", "b"]))
+        #expect(Self.row([], []) == Self.row([], []), "two empty rows are the same row")
+    }
+
+    /// Same values under **different column names** is not the same row — the
+    /// half that would be lost if equality were values alone.
+    @Test("the same values under different names are not equal")
+    func differentColumnNames() {
+        let first = Self.row([.int(1), .int(2)], ["a", "b"])
+        let second = Self.row([.int(1), .int(2)], ["b", "a"])
+        #expect(first != second, "the order of the names is part of the row's identity")
+
+        let third = Self.row([.int(1), .int(2)], ["a", "c"])
+        #expect(first != third)
+    }
+
+    /// A NULL is a value like any other, and equal to another NULL.
+    @Test("NULL compares equal to NULL")
+    func nulls() {
+        #expect(Self.row([.null], ["a"]) == Self.row([.null], ["a"]))
+        #expect(Self.row([.null], ["a"]) != Self.row([.int(0)], ["a"]))
+    }
+
+    /// Equality is reflexive, symmetric and consistent — worth one statement
+    /// because the expression has three operands and a short circuit.
+    @Test("equality is symmetric across the fast path and the slow one")
+    func symmetry() {
+        let shared = MySQLRowSchema(["a"].map(Self.column))
+        let onShared = MySQLRow(values: [.int(1)], schema: shared)
+        let onOwn = Self.row([.int(1)], ["a"])
+
+        #expect(onShared == onOwn)
+        #expect(onOwn == onShared, "and the other way round")
+        #expect(onShared == onShared)
+    }
+}
