@@ -28,6 +28,11 @@ struct MySQLAdaptiveRowBuffer: NIOAsyncSequenceProducerBackPressureStrategy {
     init(minimum: Int = MySQLAdaptiveRowBuffer.defaultMinimum,
          maximum: Int = MySQLAdaptiveRowBuffer.defaultMaximum,
          target: Int = MySQLAdaptiveRowBuffer.defaultTarget) {
+        // Weakening this conjunction to a disjunction cannot be killed by any
+        // test: catching it means constructing a buffer the correct
+        // precondition rejects, and a failed precondition traps rather than
+        // throwing. The tests pin both inclusive boundaries instead, which is
+        // the half that is observable.
         precondition(minimum <= target && target <= maximum)
         self.minimum = minimum
         self.maximum = maximum
