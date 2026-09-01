@@ -316,4 +316,234 @@ struct CompressedProtocolTests {
         }
         _ = try? channel.finish()
     }
+
+    // MARK: - The size the frame claims
+
+    /// A compressed frame states its inflated size in its own header, and that
+    /// number sizes the destination buffer. It is therefore **the peer choosing
+    /// an allocation** — the classic decompression-bomb shape, where a few
+    /// kilobytes on the wire ask for a gigabyte of memory.
+    ///
+    /// The limit is `max_allowed_packet`, which is what the server itself would
+    /// enforce in the other direction. Nothing tested it, so the mutation sweep
+    /// left the comparison alive.
+    @Test("a frame claiming more than max_allowed_packet is refused before inflating")
+    func oversizedClaimIsRefused() throws {
+        let state = MySQLCompressionState()
+        state.enable(level: MySQLCompression.defaultLevel)
+
+        let channel = EmbeddedChannel()
+        try channel.pipeline.syncOperations.addHandler(
+            ByteToMessageHandler(MySQLCompressedFrameDecoder(state: state, maxAllowedPacket: 1024))
+        )
+
+        // A tiny frame that claims to inflate to 16 MiB.
+        var wire = ByteBuffer()
+        wire.writeInteger(UInt16(8), endianness: .little)      // compressed length, low
+        wire.writeInteger(UInt8(0))                            // compressed length, high
+        wire.writeInteger(UInt8(0))                            // sequence
+        wire.writeInteger(UInt16(0xFFFF), endianness: .little) // uncompressed, low
+        wire.writeInteger(UInt8(0xFF))                         // uncompressed, high
+        wire.writeBytes([UInt8](repeating: 0, count: 8))
+
+        #expect(throws: MySQLProtocolError.self) {
+            try channel.writeInbound(wire)
+        }
+        _ = try? channel.finish()
+    }
+
+    /// The same guard applies to a **stored** frame, where the compressed
+    /// length is the inflated length — a different field, so a check written
+    /// against only one of them would miss it.
+    @Test("an oversized stored frame is refused too")
+    func oversizedStoredFrameIsRefused() throws {
+        let state = MySQLCompressionState()
+        state.enable(level: MySQLCompression.defaultLevel)
+
+        let channel = EmbeddedChannel()
+        try channel.pipeline.syncOperations.addHandler(
+            ByteToMessageHandler(MySQLCompressedFrameDecoder(state: state, maxAllowedPacket: 1024))
+        )
+
+        var wire = ByteBuffer()
+        wire.writeInteger(UInt16(0xFFFF), endianness: .little)
+        wire.writeInteger(UInt8(0xFF))                         // compressed length: 16 MiB
+        wire.writeInteger(UInt8(0))
+        wire.writeInteger(UInt16(0), endianness: .little)      // uncompressed 0: stored
+        wire.writeInteger(UInt8(0))
+
+        #expect(throws: MySQLProtocolError.self) {
+            try channel.writeInbound(wire)
+        }
+        _ = try? channel.finish()
+    }
+
+    /// A frame exactly at the limit is allowed, so the guard is a limit and not
+    /// an off-by-one that rejects the largest legal packet.
+    @Test("a frame exactly at max_allowed_packet is allowed through")
+    func frameAtTheLimitIsAllowed() throws {
+        let payload = [UInt8](repeating: 0x41, count: 512)
+        let state = MySQLCompressionState()
+        state.enable(level: MySQLCompression.defaultLevel)
+
+        let writer = EmbeddedChannel()
+        try writer.pipeline.syncOperations.addHandler(MySQLCompressedFrameEncoder(state: state))
+        var input = ByteBuffer()
+        input.writeBytes(payload)
+        try writer.writeOutbound(input)
+        var wire = ByteBuffer()
+        while var framed = try writer.readOutbound(as: ByteBuffer.self) {
+            wire.writeBuffer(&framed)
+        }
+
+        let reader = EmbeddedChannel()
+        try reader.pipeline.syncOperations.addHandler(
+            ByteToMessageHandler(
+                MySQLCompressedFrameDecoder(state: state, maxAllowedPacket: payload.count)
+            )
+        )
+        try reader.writeInbound(wire)
+        var out = [UInt8]()
+        while let chunk = try reader.readInbound(as: ByteBuffer.self) {
+            out += chunk.getBytes(at: chunk.readerIndex, length: chunk.readableBytes) ?? []
+        }
+        #expect(out == payload, "a packet of exactly the limit is legal")
+        _ = try? writer.finish()
+        _ = try? reader.finish()
+    }
+
+    // MARK: - Stored versus deflated
+
+    /// Below `minimumCompressLength` a payload is stored verbatim, because
+    /// deflating it costs CPU and usually bytes. At and above it, deflation is
+    /// attempted — and *still* falls back to stored if the result is not
+    /// smaller, since deflate can grow incompressible data.
+    ///
+    /// Both decisions are boundaries and both were unexercised at the turnover.
+    @Test("the stored/deflated decision turns over at the minimum length")
+    func storedDecisionBoundary() throws {
+        func isStored(_ count: Int) throws -> Bool {
+            let state = MySQLCompressionState()
+            state.enable(level: MySQLCompression.defaultLevel)
+            let channel = EmbeddedChannel()
+            try channel.pipeline.syncOperations.addHandler(
+                MySQLCompressedFrameEncoder(state: state)
+            )
+            var input = ByteBuffer()
+            // Highly compressible, so the only reason to store it is the length.
+            input.writeBytes([UInt8](repeating: 0x41, count: count))
+            try channel.writeOutbound(input)
+            var framed = try #require(try channel.readOutbound(as: ByteBuffer.self))
+            let header = try #require(MySQLCompressedPacketHeader.parse(&framed))
+            _ = try? channel.finish()
+            return header.isStored
+        }
+
+        let minimum = MySQLCompression.minimumCompressLength
+        #expect(try isStored(minimum - 1), "one byte below the minimum is stored")
+        #expect(try !isStored(minimum), "at the minimum, deflation is attempted")
+        #expect(try !isStored(minimum + 1))
+    }
+
+    /// Incompressible data at or above the minimum still comes out stored,
+    /// because deflating it produced something no smaller. That is the second
+    /// decision, and it is the one that keeps compression from costing
+    /// bandwidth on binary columns.
+    @Test("incompressible data falls back to a stored frame")
+    func incompressibleFallsBackToStored() throws {
+        let state = MySQLCompressionState()
+        state.enable(level: MySQLCompression.defaultLevel)
+        let channel = EmbeddedChannel()
+        try channel.pipeline.syncOperations.addHandler(MySQLCompressedFrameEncoder(state: state))
+
+        // Deterministic but incompressible: a counter through a multiplier.
+        var value: UInt64 = 0x9E3779B97F4A7C15
+        let noise = (0..<4096).map { _ -> UInt8 in
+            value = value &* 6_364_136_223_846_793_005 &+ 1
+            return UInt8(truncatingIfNeeded: value >> 33)
+        }
+        var input = ByteBuffer()
+        input.writeBytes(noise)
+        try channel.writeOutbound(input)
+        var framed = try #require(try channel.readOutbound(as: ByteBuffer.self))
+        let header = try #require(MySQLCompressedPacketHeader.parse(&framed))
+        #expect(header.isStored, "deflate grew it, so the frame is stored")
+        _ = try? channel.finish()
+    }
+
+    // MARK: - zstd
+
+    /// The zstd path had no coverage at all — every test above exercises zlib,
+    /// which is a different library reached through a different branch.
+    @Test("zstd round-trips through the pipeline")
+    func zstdRoundTrips() throws {
+        let payload = Array("SELECT * FROM users WHERE id = 1".utf8) + [UInt8](repeating: 0x20, count: 512)
+        let deflated = try MySQLCompression.compressZstd(payload, level: 3)
+        #expect(deflated.count < payload.count, "this payload should compress")
+        let inflated = try MySQLCompression.decompressZstd(deflated, expectedCount: payload.count)
+        #expect(inflated == payload)
+    }
+
+    /// A zstd frame records its own content size, so it can be checked against
+    /// the packet header rather than trusted. A frame that disagrees with its
+    /// envelope is corrupt or hostile — and sizing the buffer from the envelope
+    /// alone is exactly how a small claim inflates into a large write.
+    @Test("a zstd frame disagreeing with the packet header is refused")
+    func zstdFrameSizeMustMatchTheHeader() throws {
+        let payload = [UInt8](repeating: 0x41, count: 1024)
+        let deflated = try MySQLCompression.compressZstd(payload, level: 3)
+        #expect(throws: MySQLProtocolError.self, "the frame says 1024, the header says 64") {
+            _ = try MySQLCompression.decompressZstd(deflated, expectedCount: 64)
+        }
+        #expect(throws: MySQLProtocolError.self) {
+            _ = try MySQLCompression.decompressZstd(deflated, expectedCount: 4096)
+        }
+    }
+
+    @Test("zstd garbage is refused rather than inflated")
+    func zstdGarbage() {
+        #expect(throws: MySQLProtocolError.self) {
+            _ = try MySQLCompression.decompressZstd([1, 2, 3, 4, 5, 6, 7, 8], expectedCount: 100)
+        }
+    }
+
+    /// An expected count of zero means a stored frame, which both decoders
+    /// short-circuit rather than handing an empty buffer to the library.
+    @Test("an expected count of zero yields nothing, for both algorithms")
+    func zeroExpectedCount() throws {
+        #expect(try MySQLCompression.decompress([1, 2, 3], expectedCount: 0).isEmpty)
+        #expect(try MySQLCompression.decompressZstd([1, 2, 3], expectedCount: 0).isEmpty)
+        // And with a *valid* frame, which is the case that distinguishes
+        // "nothing to inflate" from "inflate and check the size": the frame
+        // records 1024 bytes, and a zero expectation must short-circuit rather
+        // than reject it for disagreeing.
+        let frame = try MySQLCompression.compressZstd(
+            [UInt8](repeating: 0x41, count: 1024), level: 3
+        )
+        #expect(try MySQLCompression.decompressZstd(frame, expectedCount: 0).isEmpty)
+    }
+
+    /// And compressing nothing produces nothing rather than a minimal frame.
+    @Test("compressing an empty payload produces nothing")
+    func emptyInput() throws {
+        #expect(try MySQLCompression.compressZstd([], level: 3).isEmpty)
+    }
+
+    /// Random bytes into both decompressors, seeded. A corrupt frame must
+    /// produce an error rather than a trap or an over-long write.
+    @Test("no random frame traps either decompressor", arguments: [UInt64](1...8))
+    func randomFramesAreSafe(seed: UInt64) {
+        var state = seed &* 6_364_136_223_846_793_005 &+ 1
+        func next() -> UInt64 {
+            state ^= state << 13; state ^= state >> 7; state ^= state << 17
+            return state
+        }
+        for _ in 0..<120 {
+            let count = Int(next() % 64)
+            let bytes = (0..<count).map { _ in UInt8(next() % 256) }
+            let expected = Int(next() % 4096)
+            _ = try? MySQLCompression.decompress(bytes, expectedCount: expected)
+            _ = try? MySQLCompression.decompressZstd(bytes, expectedCount: expected)
+        }
+    }
 }

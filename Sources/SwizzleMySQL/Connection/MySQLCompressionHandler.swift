@@ -189,6 +189,10 @@ public final class MySQLCompressedFrameEncoder: ChannelOutboundHandler {
                 let deflated = state.usesZstd
                     ? try? MySQLCompression.compressZstd(chunk, level: state.level)
                     : try? MySQLCompression.compress(chunk, level: state.level)
+                // Strictly-smaller rather than not-larger. The two differ only
+                // when deflate returns exactly the input size, which is not
+                // practically constructible and puts the same number of bytes
+                // on the wire either way — so no test kills a mutation of it.
                 if let deflated, deflated.count < chunk.count {
                     body = deflated
                     uncompressedLength = chunk.count
