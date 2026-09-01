@@ -837,6 +837,14 @@ public struct MySQLBinlogEventDecoder: Sendable {
         }
 
         // `PARTIAL_UPDATE_ROWS_EVENT` is v2-shaped: same extra-data block.
+        //
+        // The three MariaDB *compressed* constants here are the non-V1 forms,
+        // and no fixture produces one: with `log_bin_compress` ON, MariaDB
+        // 11.4–12.3 emit the **V1** variants, which are correctly excluded.
+        // Measured, not assumed — removing the last disjunct leaves the whole
+        // suite green, including the compressed-delete integration test. So no
+        // test can kill a mutation of it, and the honest reason is that the
+        // event does not occur here rather than that nothing looks.
         let isV2 = type == .writeRows || type == .updateRows || type == .deleteRows
             || type == .partialUpdateRows
             || type == .mariaDBWriteRowsCompressed || type == .mariaDBUpdateRowsCompressed
