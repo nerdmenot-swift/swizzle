@@ -14,6 +14,13 @@
 #     with itself.
 #   - A splitter test read `sql.contains("SELECT 1")` while the value under test
 #     was the statement *plus four lines of prose*.
+#   - **This script**, which bounded each mutant at a fixed 180 seconds covering
+#     build *and* test. As the suite grew, a healthy run crossed the bound and
+#     was killed at it — tallied as a hang, which counts as a kill. The score
+#     rose because the suite got slower. It reported 90.3% when 187 of its 408
+#     kills were unverified, and gave itself away by listing hangs in value
+#     types with no loop in them. The bound is derived from a measured baseline
+#     now; a tool that grades other code has to be gradeable itself.
 #
 # A passing suite says "no test failed". It does not say "a bug would have been
 # caught", and those are different claims. This measures the second one: change
@@ -170,6 +177,7 @@ run_suite() {
 # macOS ships no `timeout`, so this polls. The kill is by arena path rather than
 # by process name: `pkill -f swiftpm-testing-helper` would take out a test run
 # the user happened to start in another window.
+MUTATION_TIMEOUT_SET="${MUTATION_TIMEOUT:-}"
 MUTATION_TIMEOUT="${MUTATION_TIMEOUT:-180}"
 
 run_suite_bounded() {
@@ -188,9 +196,34 @@ run_suite_bounded() {
   wait "$pid"
 }
 
+# The bound is **derived from a measured baseline**, not a constant.
+#
+# It was a constant, 180 seconds, and that quietly stopped meaning what it said.
+# The bound covers build *and* test, and as the suite grew a healthy mutant run
+# crossed it — so a run that would have failed honestly was killed at the bound
+# and tallied as a hang, which counts as a kill. The score went up because the
+# suite got slower.
+#
+# It showed as 187 "hangs" in 456 mutants, spread across `MySQLConnectionURL`,
+# `MySQLSessionTimeZone` and `StatementCache` — value types with no loop in
+# them. Code that cannot hang appearing in a hang tally is what gave it away.
+#
+# Measuring the baseline is what keeps this honest as the suite grows, and it
+# costs nothing: the green check below has to run anyway.
 echo "Checking the suite is green before mutating…"
+baseline_start=$SECONDS
 run_suite >/dev/null 2>&1 || { echo "baseline is RED — fix that first" >&2; exit 1; }
-echo "  green."
+baseline_elapsed=$((SECONDS - baseline_start))
+echo "  green in ${baseline_elapsed}s."
+
+# Three times the baseline, floored at the old constant. A genuine hang runs
+# forever, so any generous multiple separates it from a slow build; the point is
+# only that the bound tracks the suite rather than a number someone typed once.
+if [[ -z "${MUTATION_TIMEOUT_SET:-}" ]]; then
+  derived=$((baseline_elapsed * 3))
+  (( derived > MUTATION_TIMEOUT )) && MUTATION_TIMEOUT=$derived
+fi
+echo "  bounding each mutant at ${MUTATION_TIMEOUT}s."
 echo
 
 # Refuse to write outside the arena, checked per file rather than assumed once.
