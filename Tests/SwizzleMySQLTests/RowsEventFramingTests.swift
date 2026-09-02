@@ -389,4 +389,83 @@ struct RowsEventFramingTests {
         #expect(rows.rows.count == 4)
         #expect(rows.rows.map { $0.first?.int } == [1, 2, 3, 4])
     }
+
+    // MARK: - Event details
+
+    /// A MySQL GTID event is exactly flags(1) + UUID(16) + sequence(8), and the
+    /// length check is what stops a short one being read as a valid GTID with a
+    /// garbage sequence — which a consumer would then store as its resume
+    /// position.
+    @Test("a GTID event shorter than its fixed layout is refused")
+    func gtidLengthBoundary() throws {
+        var uuid: [UInt8] = []
+        for i in 0..<16 { uuid.append(UInt8(i)) }
+        let body: [UInt8] = [0x01] + uuid + [7, 0, 0, 0, 0, 0, 0, 0]
+        #expect(body.count == 25, "the premise: the layout is exactly 25 bytes")
+
+        var decoder = MySQLBinlogEventDecoder()
+        var full = ByteBuffer()
+        full.writeBytes(Self.header(type: .gtid, body: body).readableBytesView)
+        let event = try decoder.decode(full)
+        guard case .gtid(let gtid) = event.payload, case .mysql(_, let sequence) = gtid else {
+            Issue.record("expected a MySQL GTID, got \(event.payload)"); return
+        }
+        #expect(sequence == 7)
+
+        // Every length below it is refused rather than read as a short GTID.
+        for length in 0..<25 {
+            var short = ByteBuffer()
+            short.writeBytes(Self.header(type: .gtid, body: Array(body.prefix(length))).readableBytesView)
+            var decoder = MySQLBinlogEventDecoder()
+            #expect(throws: MySQLProtocolError.self, "\(length) bytes") {
+                _ = try decoder.decode(short)
+            }
+        }
+    }
+
+    /// `isEndOfStatement` is bit 0 of the rows event's own flags, and it is how
+    /// a consumer knows a multi-event statement has finished — batching on it
+    /// without it set means holding a batch forever.
+    @Test("the end-of-statement flag is bit zero of the rows event flags")
+    func endOfStatementFlag() throws {
+        for (flags, expected) in [(UInt16(0x0000), false), (0x0001, true),
+                                  (0x0002, false), (0x0003, true), (0xFFFF, true)] {
+            var body = Self.tableIDBytes()
+            body += [UInt8(flags & 0xFF), UInt8(flags >> 8)]
+            body += [0x02, 0x00]                               // empty extra-data block
+            body += [0x01, 0xFF]                               // one column, present
+            body += Self.intRow(7)
+
+            let rows = try Self.decodeRows(type: .writeRows, body: body)
+            #expect(rows.isEndOfStatement == expected, "flags 0x\(String(flags, radix: 16))")
+            #expect(rows.flags == flags)
+        }
+    }
+
+    /// A typed array wraps another type, and a `VARCHAR` inside one carries a
+    /// **third** metadata byte that a plain VARCHAR does not.
+    ///
+    /// Nothing decodes typed-array values — they are replication-internal, for
+    /// multi-valued indexes — but the byte still has to be consumed, or every
+    /// column after the array reads its metadata from one byte early. The
+    /// sentinel column is what makes that visible.
+    @Test("a VARCHAR inside a typed array consumes its extra metadata byte")
+    func typedArrayVarcharMetadata() throws {
+        var buffer = ByteBuffer()
+        buffer.writeBytes([MySQLColumnType.varchar.rawValue])   // the element type
+        buffer.writeBytes([0x40, 0x00])                         // its two length bytes
+        buffer.writeBytes([0x07])                               // and the array's third byte
+        buffer.writeBytes([0x11, 0x22])                         // the next column's metadata
+
+        let metadata = try MySQLBinlogEventDecoder.parseColumnMetadata(
+            &buffer,
+            types: [MySQLColumnType.typedArray.rawValue, MySQLColumnType.varchar.rawValue]
+        )
+        #expect(metadata.count == 2)
+        #expect(
+            metadata[1] == 0x2211,
+            "the column after the array read its metadata from the wrong offset"
+        )
+        #expect(buffer.readableBytes == 0, "and everything was consumed")
+    }
 }

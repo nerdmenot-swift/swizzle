@@ -149,6 +149,45 @@ struct StatusVariableParsingTests {
         #expect(parsed.defaultCollationForUTF8MB4 == 88, "parsing continues past an empty list")
     }
 
+
+    /// Two keys the well-formed block above omits, so their guards were never
+    /// walked.
+    ///
+    /// `CATALOG` is NUL-suffixed where the other var-strings are not, and
+    /// `INVOKER` carries **two** strings rather than one — a user and a host.
+    /// Reading either width wrong does not fail: the walk continues from the
+    /// wrong offset and reads the middle of a name as the next key, which is
+    /// the failure this whole parser is shaped to avoid.
+    @Test("the two-string and NUL-suffixed keys are walked at the right width")
+    func catalogAndInvokerWidths() {
+        var bytes: [UInt8] = []
+        bytes += [0x02, 3] + Array("def".utf8) + [0x00]         // CATALOG, NUL-suffixed
+        bytes += [0x0B, 4] + Array("root".utf8)                 // INVOKER: user
+        bytes += [9] + Array("localhost".utf8)                  //          then host
+        bytes += [0x05, 6] + Array("+00:00".utf8)               // TIME_ZONE, after both
+
+        let parsed = Self.parse(bytes)
+        #expect(
+            parsed.timeZone == "+00:00",
+            "a variable after CATALOG and INVOKER is only reachable if both were consumed at exactly the right width"
+        )
+    }
+
+    /// And each on its own, so a failure names which one.
+    @Test("CATALOG consumes its trailing NUL")
+    func catalogConsumesItsNUL() {
+        var bytes: [UInt8] = [0x02, 3] + Array("def".utf8) + [0x00]
+        bytes += [0x12, 77, 0]                                  // a variable after it
+        #expect(Self.parse(bytes).defaultCollationForUTF8MB4 == 77)
+    }
+
+    @Test("INVOKER consumes both of its strings")
+    func invokerConsumesBothStrings() {
+        var bytes: [UInt8] = [0x0B, 4] + Array("root".utf8) + [9] + Array("localhost".utf8)
+        bytes += [0x12, 88, 0]
+        #expect(Self.parse(bytes).defaultCollationForUTF8MB4 == 88)
+    }
+
     // MARK: - Fuzzing
 
     /// Random bytes, seeded so a failure reproduces.
