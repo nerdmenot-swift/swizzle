@@ -386,7 +386,25 @@ extension QueryTimeoutTests {
         var iterator = begun.makeAsyncIterator()
         _ = await iterator.next()
         insert.cancel()
-        _ = try? await insert.value
+        // Keep what the insert task actually did, so a failure says *why*.
+        //
+        // This test has now been wrong three times in three different ways, and
+        // the third failed only on Swift 6.0 while passing everywhere else. The
+        // driver refuses a queued statement by way of a flag that
+        // `withTaskCancellationHandler` sets from `onCancel`, and the failing run
+        // had that flag still clear six seconds after `cancel()` — which is not a
+        // race, it is the handler not running. Guessing a fourth structure
+        // without evidence is how the first three happened.
+        var outcome = "insert task: <no result>"
+        do {
+            _ = try await insert.value
+            outcome = "insert task: completed WITHOUT throwing — cancellation had no effect"
+        } catch {
+            outcome = "insert task: threw \(type(of: error)) — \(error)"
+        }
+        // Cancelling before the body starts is handled correctly on 6.3 — 200 of
+        // 200 attempts — so a failure here narrows to the queued case.
+        let wasCancelled = insert.isCancelled
 
         // Drain deterministically rather than outwaiting the blocker.
         //
@@ -399,7 +417,11 @@ extension QueryTimeoutTests {
 
         let rows = try await connection.query("SELECT COUNT(*) FROM marks")
         let value = rows[0].values[0]
-        #expect(value == .int(0), "a statement cancelled before it began still ran: \(value)")
+        #expect(
+            value == .int(0),
+            Comment(rawValue: "a statement cancelled before it began still ran. "
+                + "count=\(value), Task.isCancelled=\(wasCancelled), \(outcome)")
+        )
     }
 }
 
