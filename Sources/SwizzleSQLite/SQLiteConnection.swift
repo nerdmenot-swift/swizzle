@@ -80,7 +80,29 @@ public final class SQLiteConnection: @unchecked Sendable {
         handle = pointer
         queue = DispatchQueue(label: "swizzle.sqlite.\(UInt(bitPattern: Int(bitPattern: pointer)))")
 
-        sqlite3_busy_timeout(handle, Int32(busyTimeout * 1000))
+        // `Int32(_:)` traps on a Double outside its range or on a non-finite
+        // one, and `busyTimeout` is a **public parameter with no hostile input
+        // anywhere near it**: `busyTimeout: .infinity` is the obvious way to ask
+        // for "wait as long as it takes", and it killed the process on open.
+        // Anything past about 24.8 days did the same, as did `.nan`.
+        //
+        // Clamped rather than rejected, because every value here has an obvious
+        // intent: infinity means the longest wait SQLite can express, a negative
+        // means do not wait, and `.nan` is a caller's arithmetic bug that should
+        // surface as an immediate `SQLITE_BUSY` rather than as a crash or a
+        // silent multi-day stall.
+        let requestedMilliseconds = busyTimeout * 1000
+        let boundedMilliseconds: Int32
+        if requestedMilliseconds.isNaN {
+            boundedMilliseconds = 0
+        } else if requestedMilliseconds >= Double(Int32.max) {
+            boundedMilliseconds = .max
+        } else if requestedMilliseconds <= 0 {
+            boundedMilliseconds = 0
+        } else {
+            boundedMilliseconds = Int32(requestedMilliseconds)
+        }
+        sqlite3_busy_timeout(handle, boundedMilliseconds)
         // Every 2000 VDBE instructions — often enough that a cancelled query stops
         // promptly, rare enough that the check costs nothing measurable.
         sqlite3_progress_handler(
@@ -513,6 +535,18 @@ public final class SQLiteConnection: @unchecked Sendable {
                     }
                 }
             case .blob(let bytes):
+                // The same ceiling the text case above checks. It was missing
+                // here, so a blob over 2 GiB trapped in `Int32(_:)` where a
+                // string of the same size threw a clean SQLITE_TOOBIG.
+                guard bytes.count <= Int32.max else {
+                    sqlite3_finalize(statement)
+                    throw SQLiteError(
+                        code: SQLITE_TOOBIG,
+                        message: "blob parameter is \(bytes.count) bytes, over the "
+                            + "\(Int32.max) SQLite can bind",
+                        sql: sql
+                    )
+                }
                 result = bytes.isEmpty
                     ? sqlite3_bind_zeroblob(statement, index, 0)
                     : bytes.withUnsafeBufferPointer {

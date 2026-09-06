@@ -135,7 +135,10 @@ public final class SQLiteReaderPool: @unchecked Sendable {
         writer = try makeConnection(false)
 
         var opened: [SQLiteConnection] = []
-        opened.reserveCapacity(max(1, readers))
+        // No reserve. `readers` is the caller's number and reserveCapacity aborts
+        // rather than throwing on an absurd one, while the saving on a list of at
+        // most a few dozen connections is not measurable. Bounding it instead
+        // would mean inventing a maximum this type has no basis to pick.
         do {
             for _ in 0..<max(1, readers) { opened.append(try makeConnection(true)) }
         } catch {
