@@ -42,13 +42,34 @@ struct MySQLReadTimeoutTests {
         configuration.readTimeout = .seconds(2)
 
         let started = ContinuousClock().now
-        await #expect(throws: (any Error).self) {
+        do {
             let connection = try await MySQLConnection.connect(
                 configuration: configuration, on: group.next())
             connection.closeImmediately()
+            Issue.record("a silent server completed the connect")
+        } catch let error as MySQLProtocolError {
+            // **The error is the claim.** It names the mechanism that bounded
+            // the wait, which is what this test is actually about — that the
+            // silence was cut short by `connect_timeout` rather than left to
+            // TCP.
+            guard case .connectionClosed(let reason) = error else {
+                Issue.record("expected the connect timeout, got \(error)")
+                return
+            }
+            #expect(reason.contains("connect_timeout"), Comment(rawValue: reason))
         }
-        // Bounded well under the fifteen minutes TCP would take on its own.
-        #expect(ContinuousClock().now - started < .seconds(10))
+        // A backstop, not a measurement.
+        //
+        // This was `< .seconds(10)`, and it failed on CI at 22.8 seconds — with
+        // the timeout working perfectly, since the same connect takes 0.5s
+        // locally and the error above confirms which mechanism fired. What the
+        // stopwatch was measuring was a loaded two-core runner scheduling 1796
+        // parallel tests, not the driver.
+        //
+        // The bound stays only to catch what the test exists for: a connect left
+        // to TCP, which takes about fifteen minutes. Anything under that is the
+        // machine's business, not this test's.
+        #expect(ContinuousClock().now - started < .seconds(120))
     }
 
     /// The setting is off unless asked for, matching `go-sql-driver`, whose

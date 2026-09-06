@@ -534,7 +534,15 @@ struct OnlineDDLCutoverWaitTests {
             #expect(message.contains("applied 0 changes"), "\(message)")
             #expect(message.contains("nothing was swapped"), "\(message)")
         }
-        #expect(ContinuousClock().now - started < .seconds(10))
+        // A backstop, not a measurement — the assertions above are the claim,
+        // and they name what the wait saw before giving up.
+        //
+        // Was ten seconds against a 400ms ceiling, which reads like a 25x margin
+        // and is not one: the same shape at ten seconds failed on macOS CI at
+        // 22.8s in `MySQLReadTimeoutTests`, and on Linux at 10.99s in
+        // `PostgresReadTimeoutTests`, both with the mechanism working. A loaded
+        // runner stretches the measurement, not the timeout.
+        #expect(ContinuousClock().now - started < .seconds(120))
     }
 }
 

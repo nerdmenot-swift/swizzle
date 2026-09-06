@@ -363,22 +363,40 @@ extension QueryTimeoutTests {
         _ = try await connection.query("CREATE TABLE marks (id INTEGER PRIMARY KEY)")
 
         // Held by something SQLite has no idea about, so cancellation cannot free
-        // it the way interrupting a query would.
-        // Six seconds against a 300ms wait. The earlier two-against-250ms failed on
-        // CI for the reason this suite keeps rediscovering: a margin is not a margin
-        // when the machine can stall the short side past the long one.
+        // it the way interrupting a query would. The queue is **serial**, which is
+        // the property the rest of this test is built on.
         connection.occupyQueueForTesting(seconds: 6)
 
-        let insert = Task { try await connection.query("INSERT INTO marks (id) VALUES (1)") }
-        // Long enough to be queued behind the blocker on any machine. If it has
-        // not even started, cancelling still satisfies the claim under test.
-        try await Task.sleep(for: .milliseconds(300))
+        // Third version, and the first with no margin in it.
+        //
+        // The two above each picked a number — 250ms against 2s, then 300ms
+        // against 6s — and a margin is not a margin when the machine can stall
+        // the short side past the long one. CI stalled the 300ms past the 6s and
+        // the statement ran normally.
+        //
+        // The task now signals as its body begins, so the cancel lands after the
+        // statement was enqueued and before the queue could reach it, with
+        // nothing in between that a scheduler can stretch.
+        let (begun, signalBegun) = AsyncStream<Void>.makeStream()
+        let insert = Task {
+            signalBegun.yield()
+            signalBegun.finish()
+            return try await connection.query("INSERT INTO marks (id) VALUES (1)")
+        }
+        var iterator = begun.makeAsyncIterator()
+        _ = await iterator.next()
         insert.cancel()
         _ = try? await insert.value
 
-        // Outlast the blocker: if the cancelled statement was merely queued
-        // rather than refused, this is when it would land.
-        try await Task.sleep(for: .seconds(8))
+        // Drain deterministically rather than outwaiting the blocker.
+        //
+        // The insert's task has finished, so it can enqueue nothing further, and
+        // the queue is serial — when a statement queued *now* comes back, the
+        // blocker and everything behind it have run, including the insert if it
+        // was merely queued rather than refused. That is the same claim the old
+        // eight-second sleep was making, without the sleep.
+        _ = try await connection.query("SELECT 1")
+
         let rows = try await connection.query("SELECT COUNT(*) FROM marks")
         let value = rows[0].values[0]
         #expect(value == .int(0), "a statement cancelled before it began still ran: \(value)")
