@@ -113,14 +113,22 @@ enum PostgresTestServer {
     /// Oldest still supported upstream, and where multiranges arrived.
     static let postgres14 = Instance(name: "postgres14", port: 5433, major: 14)
 
+    /// Widely deployed, and previously skipped. The gap between 14 and 16 was
+    /// never a decision — it is where the matrix happened to start.
+    static let postgres15 = Instance(name: "postgres15", port: 5435, major: 15)
+
     /// The version developed against, and the one every other suite uses.
     static let postgres16 = Instance(name: "postgres16", port: 5432, major: 16)
+
+    /// The most common version in new deployments, and likewise skipped until
+    /// now.
+    static let postgres17 = Instance(name: "postgres17", port: 5436, major: 17)
 
     /// Current. Adds direct TLS negotiation, which this driver does not
     /// implement — connecting at all against it is the point.
     static let postgres18 = Instance(name: "postgres18", port: 5434, major: 18)
 
-    static let all = [postgres14, postgres16, postgres18]
+    static let all = [postgres14, postgres15, postgres16, postgres17, postgres18]
 
     /// The fixtures actually running, probed once.
     ///

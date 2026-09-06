@@ -73,12 +73,30 @@ struct CancellationTests {
         let values = (0..<20_000).map { "(\($0),'\(pad)')" }.joined(separator: ",")
         _ = try await connection.query("INSERT INTO \(table) VALUES \(values)")
 
+        // **Two barriers, so the cancel cannot lose a race with consumption.**
+        //
+        // One barrier releases both sides at once, and the consumer is then free
+        // to burn through the remaining rows while `cancel()` is still on its
+        // way. That is not hypothetical: the nightly coverage job caught this
+        // consuming all 20,000 before cancellation landed, which is the same
+        // cooperative-pool contention that delays cancellation everywhere else
+        // in this suite.
+        //
+        // With two, the consumer stops at `cancelled` and does not resume until
+        // the test has arrived there — which it does only after calling
+        // `cancel()`. So cancellation is always visible before the next row is
+        // taken, and the assertion below is about the driver rather than about
+        // scheduling luck.
         let started = Barrier(count: 2)
+        let cancelled = Barrier(count: 2)
         let task = Task { () -> Int in
             var seen = 0
             for try await _ in try await connection.stream("SELECT n, pad FROM \(table)") {
                 seen += 1
-                if seen == 1 { await started.arriveAndWait() }
+                if seen == 1 {
+                    await started.arriveAndWait()
+                    await cancelled.arriveAndWait()
+                }
             }
             return seen
         }
@@ -87,6 +105,7 @@ struct CancellationTests {
         // cancellation rather than a race with the query starting.
         await started.arriveAndWait()
         task.cancel()
+        await cancelled.arriveAndWait()
         let seen = try? await task.value
         #expect((seen ?? 0) < 20_000, "cancellation should have stopped it early")
 

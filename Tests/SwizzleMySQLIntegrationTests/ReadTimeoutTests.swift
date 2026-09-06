@@ -47,16 +47,22 @@ struct MySQLReadTimeoutTests {
                 configuration: configuration, on: group.next())
             connection.closeImmediately()
             Issue.record("a silent server completed the connect")
-        } catch let error as MySQLProtocolError {
-            // **The error is the claim.** It names the mechanism that bounded
-            // the wait, which is what this test is actually about — that the
-            // silence was cut short by `connect_timeout` rather than left to
-            // TCP.
-            guard case .connectionClosed(let reason) = error else {
-                Issue.record("expected the connect timeout, got \(error)")
-                return
-            }
-            #expect(reason.contains("connect_timeout"), Comment(rawValue: reason))
+        } catch {
+            // **The error is the claim**, and *any* error type satisfies it as
+            // long as it names a timeout.
+            //
+            // Catching `MySQLProtocolError` specifically was wrong, and the
+            // nightly flake job found it on its first run: this listener accepts
+            // the TCP connect and then says nothing, but under load the connect
+            // itself can miss the 500ms deadline, and NIO reports that as its
+            // own `Connect timeout (500 ms)` rather than as the driver's
+            // handshake error. Both are the bound doing its job. Only the
+            // narrow catch made one of them a failure.
+            let description = "\(error)"
+            #expect(
+                description.contains("connect_timeout") || description.contains("Connect timeout"),
+                Comment(rawValue: "expected a timeout, got \(type(of: error)): \(description)")
+            )
         }
         // A backstop, not a measurement.
         //

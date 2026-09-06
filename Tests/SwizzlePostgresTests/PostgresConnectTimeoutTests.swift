@@ -131,7 +131,19 @@ struct PostgresConnectTimeoutTests {
         var configuration = try PostgresConnectionConfiguration(
             swizzleURL: PostgresTestServer.url
         )
-        configuration.connectTimeout = .seconds(5)
+        // Sixty seconds, and the number is not a measurement.
+        //
+        // The claim is only that a configured timeout does not fire against a
+        // server that is answering — nothing here is timing how fast Postgres
+        // connects. Five seconds looked like a generous bound for a local
+        // fixture and is not one: a real connect does a TLS handshake and SCRAM
+        // authentication, and under the parallel suite on a loaded runner that
+        // crossed five seconds. The nightly flake job caught it on iteration 2
+        // of 5.
+        //
+        // A timeout that genuinely broke working connections still fails this,
+        // because it would fire long before sixty seconds.
+        configuration.connectTimeout = .seconds(60)
 
         let connection = try await PostgresConnection.connect(
             configuration: configuration,
