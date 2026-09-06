@@ -283,6 +283,33 @@ public final class SQLiteConnection: @unchecked Sendable {
     }
 
     private func withQueue<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+        // **Checked here, in task context, before anything is enqueued.**
+        //
+        // Everything below refuses a cancelled statement by way of a flag that
+        // `withTaskCancellationHandler` sets from `onCancel`. That covers
+        // cancellation arriving *while* the work is queued, which is the case it
+        // was written for. It does not cover cancellation that arrives before
+        // the handler is installed: no handler, so nothing sets the flag, and
+        // the statement runs to completion on a task that is already cancelled.
+        //
+        // `withTaskCancellationHandler` is documented to invoke its handler
+        // immediately when the task is already cancelled, and relying on that
+        // alone is what failed. CI caught it with the message this check exists
+        // to prevent — `Task.isCancelled=true, insert task: completed WITHOUT
+        // throwing — cancellation had no effect` — an INSERT that ran, and left
+        // a row, after its task had been cancelled.
+        //
+        // Reported as an interrupt for the same reason the guard below is: the
+        // caller cannot tell "refused before starting" from "interrupted while
+        // running" and should not have to.
+        guard !Task.isCancelled else {
+            throw SQLiteError(
+                code: SQLITE_INTERRUPT,
+                message: "interrupted before the statement began",
+                sql: nil
+            )
+        }
+
         // `sqlite3_step` is a blocking C call on a dispatch queue: it does not
         // notice Swift's cancellation, so a cancelled task would otherwise wait
         // for the statement to finish anyway — which makes a timeout bound

@@ -423,6 +423,45 @@ extension QueryTimeoutTests {
                 + "count=\(value), Task.isCancelled=\(wasCancelled), \(outcome)")
         )
     }
+
+    /// The narrower guarantee the sibling above depends on: a query issued from
+    /// a task that is **already cancelled** must not run.
+    ///
+    /// This is not the same claim. The one above cancels a statement that is
+    /// already queued, and the driver refuses it through a flag that
+    /// `withTaskCancellationHandler` sets from `onCancel`. This one cancels
+    /// before that handler is installed, where there is no handler to fire and
+    /// nothing to set the flag — so it is checked in task context at the top of
+    /// `withQueue` instead.
+    ///
+    /// That gap is what CI found, with the message the instrumentation was added
+    /// for: `Task.isCancelled=true, insert task: completed WITHOUT throwing —
+    /// cancellation had no effect`. An INSERT that ran, and left a row, on a
+    /// task that had already been cancelled.
+    ///
+    /// It reproduced on Linux and never on macOS across 200 attempts, which is
+    /// why the check is unconditional rather than conditioned on anything: a
+    /// guarantee that holds only where the runtime happens to invoke a handler
+    /// is not a guarantee.
+    @Test("a query from an already-cancelled task never runs")
+    func queryFromCancelledTaskNeverRuns() async throws {
+        let connection = try SQLiteConnection.inMemory()
+        defer { connection.close() }
+        _ = try await connection.query("CREATE TABLE marks (id INTEGER PRIMARY KEY)")
+
+        // No blocker and no signalling: the task is cancelled before it is ever
+        // given a chance to run, so the query is entered — if at all — with
+        // cancellation already set.
+        let insert = Task { try await connection.query("INSERT INTO marks (id) VALUES (1)") }
+        insert.cancel()
+        _ = try? await insert.value
+
+        let rows = try await connection.query("SELECT COUNT(*) FROM marks")
+        #expect(
+            rows[0].values[0] == .int(0),
+            "a query issued from a cancelled task inserted a row"
+        )
+    }
 }
 
 /// What `withQueryTimeout` promises, tested without a stopwatch.
