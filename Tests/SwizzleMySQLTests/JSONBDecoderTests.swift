@@ -340,7 +340,7 @@ struct JSONBDecoderTests {
         #expect(
             try Self.decode(.object([
                 ("a", .array([.int16(1), .object([("b", .int16(2))])])),
-                ("c", .string("after"),)
+                ("c", .string("after"))
             ])) == "{\"a\":[1,{\"b\":2}],\"c\":\"after\"}"
         )
     }
