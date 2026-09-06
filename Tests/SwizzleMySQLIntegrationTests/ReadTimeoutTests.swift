@@ -69,7 +69,32 @@ struct MySQLReadTimeoutTests {
         // The bound stays only to catch what the test exists for: a connect left
         // to TCP, which takes about fifteen minutes. Anything under that is the
         // machine's business, not this test's.
-        #expect(ContinuousClock().now - started < .seconds(120))
+        let elapsed = ContinuousClock().now - started
+
+        // Keep the observation without asserting on it.
+        //
+        // CI once measured 22.8s here against a 500ms timeout — a 45x stretch —
+        // and the cause is still unknown. Three hypotheses were measured and
+        // disproved: cooperative-thread blocking by `.wait()` in other tests
+        // (they hold a thread for ~0.36s), event-loop oversubscription (the
+        // suite uses the singleton group almost everywhere), and plain CPU
+        // starvation (36 spinners on 18 cores left this at 0.505s, unmoved).
+        //
+        // Asserting on the clock is what made it flaky, so that is gone. Losing
+        // the signal entirely would make a recurrence invisible, so it prints
+        // instead: no failure, but a breadcrumb in the CI log the next time it
+        // happens.
+        if elapsed > .seconds(5) {
+            print("""
+                NOTE: the connect took \(elapsed) against a 500ms connect_timeout. \
+                The timeout fired — the error above says so — but something \
+                delayed it by more than 10x. See the comment here.
+                """)
+        }
+
+        // A backstop, not a measurement: it only catches a connect left to TCP,
+        // which takes about fifteen minutes.
+        #expect(elapsed < .seconds(120))
     }
 
     /// The setting is off unless asked for, matching `go-sql-driver`, whose
