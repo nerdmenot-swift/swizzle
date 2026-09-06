@@ -1,0 +1,166 @@
+name: Nightly
+
+# Everything here is a check that cannot justify its cost on every push but
+# that nobody will ever run by hand.
+#
+# ## Why a separate workflow at all
+#
+# `ci.yml` runs on `push` and `pull_request` only. That answers "did this commit
+# break something" and nothing else — in particular it cannot answer "is the
+# suite flaky", because a flake needs repetition to observe and a push gives one
+# sample taken at whatever moment somebody happened to commit.
+#
+# The distinction matters for a database driver more than for most software. The
+# failures that lose people's trust are the intermittent ones: a race that shows
+# up under load, a leak that needs a thousand connections to notice, a decoder
+# that traps on an input no fixed seed ever generates. None of those are visible
+# in a single green run.
+#
+# `workflow_dispatch` is here so this is runnable on demand — a scheduled job
+# nobody can trigger is a job nobody debugs.
+
+on:
+  schedule:
+    # 02:00 UTC. Nothing depends on the hour; it is simply outside the window
+    # where somebody is likely to be pushing and competing for runners.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  # ── Is the suite flaky? ────────────────────────────────────────────────────
+  #
+  # Five consecutive runs, and — the part that matters — the report says *which*
+  # iteration failed and which test. A job that only reports pass/fail across
+  # five runs tells you a flake exists without telling you what it was, which is
+  # the position we were in for weeks.
+  flake-detection:
+    name: Flake detection (suite x5)
+    runs-on: ubuntu-latest
+    container: swift:6.3.3
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fixture dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq curl libaio1t64 libncurses6 libnuma1 xz-utils
+          ARCH=$(uname -m)
+          ln -sf /usr/lib/$ARCH-linux-gnu/libaio.so.1t64 /usr/lib/$ARCH-linux-gnu/libaio.so.1
+
+      - name: Cache database distributions
+        uses: actions/cache@v4
+        with:
+          path: .testservers/dist-linux-x86_64
+          key: testservers-dist-${{ runner.os }}-${{ hashFiles('testservers/servers.conf') }}
+
+      - name: Start the fixtures
+        run: ./Scripts/test-servers.sh up
+
+      - name: Build
+        run: swift build --build-tests
+
+      # Every iteration runs even if an earlier one failed, because "fails 1 in
+      # 5" and "fails 5 in 5" are different diagnoses and stopping at the first
+      # failure cannot tell them apart.
+      - name: Suite x5
+        run: |
+          # `set +e` because a red iteration must not end the step — the whole
+          # point is to run all five. And the status is captured from `swift
+          # test` directly rather than from a pipeline: `swift test | tee | tail`
+          # reports `tail`'s status, which is always zero, so the first draft of
+          # this job could never have detected a failure.
+          set +e
+          failures=0
+          for run in 1 2 3 4 5; do
+            echo "───────────────── iteration $run ─────────────────"
+            swift test > "/tmp/run-$run.log" 2>&1
+            status=$?
+            tail -5 "/tmp/run-$run.log"
+            if [ "$status" -eq 0 ]; then
+              echo "iteration $run: green"
+            else
+              failures=$((failures + 1))
+              echo "iteration $run: RED (exit $status)"
+            fi
+          done
+
+          echo ""
+          echo "═══ summary: $failures of 5 iterations failed"
+          if [ "$failures" -gt 0 ]; then
+            echo ""
+            echo "── every test that failed, and on which iteration ──"
+            for run in 1 2 3 4 5; do
+              grep -h "✘ Test " "/tmp/run-$run.log" 2>/dev/null \
+                | sed "s/^/  iteration $run: /" || true
+            done
+            exit 1
+          fi
+
+      - name: Server logs
+        if: always()
+        run: ./Scripts/test-servers.sh logs || true
+
+  # ── Where is coverage going? ───────────────────────────────────────────────
+  #
+  # Per module, not in aggregate. The aggregate was 79.95% while
+  # SwizzleConnectionPool sat at 50.7% — the component every query on both
+  # network drivers flows through. A single number hides exactly the case worth
+  # seeing.
+  coverage:
+    name: Coverage by module
+    runs-on: ubuntu-latest
+    container: swift:6.3.3
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fixture dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq curl libaio1t64 libncurses6 libnuma1 xz-utils
+          ARCH=$(uname -m)
+          ln -sf /usr/lib/$ARCH-linux-gnu/libaio.so.1t64 /usr/lib/$ARCH-linux-gnu/libaio.so.1
+
+      - name: Cache database distributions
+        uses: actions/cache@v4
+        with:
+          path: .testservers/dist-linux-x86_64
+          key: testservers-dist-${{ runner.os }}-${{ hashFiles('testservers/servers.conf') }}
+
+      - name: Start the fixtures
+        run: ./Scripts/test-servers.sh up
+
+      - name: Test with coverage
+        run: swift test --enable-code-coverage
+
+      # Sorted worst-first, because the interesting end of this list is the top.
+      - name: Report
+        run: |
+          PROF=$(find .build -name default.profdata | head -1)
+          # `! -path '*dSYM*'` is load-bearing: the debug-symbol copy has the
+          # same name, sorts first, and carries no coverage mapping, so picking
+          # it yields an empty report and an exit status of zero — a green job
+          # reporting nothing.
+          BIN=$(find .build -name 'SwizzlePackageTests*' -type f -perm -u+x \
+                  ! -path '*dSYM*' | head -1)
+          echo "profile: $PROF"
+          echo "binary:  $BIN"
+
+          echo "═══ Coverage by module, worst first"
+          llvm-cov report "$BIN" -instr-profile "$PROF" 2>/dev/null \
+            | grep "Sources/Swizzle" \
+            | awk '{split($1,p,"/"); m=p[2]; r[m]+=$2; miss[m]+=$3}
+                   END {for (k in r)
+                     printf "%7.1f%%  %-28s (%d regions, %d uncovered)\n",
+                            100*(r[k]-miss[k])/r[k], k, r[k], miss[k]}' \
+            | sort -n
+
+          echo ""
+          echo "═══ Total"
+          llvm-cov report "$BIN" -instr-profile "$PROF" \
+            -ignore-filename-regex='(Tests|\.build|CSodium|examples)' 2>/dev/null | tail -1
