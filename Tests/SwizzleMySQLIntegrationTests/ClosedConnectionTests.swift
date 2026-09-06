@@ -152,7 +152,8 @@ struct ClosedConnectionTests {
     /// The bound is generous on purpose: this is guarding against *seconds*, and
     /// a tight assertion would flake on a loaded machine without catching
     /// anything a loose one misses.
-    @Test("closing a TLS connection is prompt")
+    @Test("closing a TLS connection is prompt",
+          .enabled(if: timingTestsEnabled, Comment(rawValue: timingTestsReason)))
     func tlsCloseIsPrompt() async throws {
         let connection = try await Self.connect(TestServers.mariadb114)
         // The fixture negotiates TLS by default; if that ever changes, this test

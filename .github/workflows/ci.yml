@@ -136,6 +136,20 @@ jobs:
             swift test
           done
 
+      # The generator's output has to *compile*, which no test in the suite can
+      # check — every other assertion about it is about the text it emits, and
+      # plausible text is not Swift. `Scripts/negative-tests.sh` established the
+      # pattern of driving `swiftc` out of band; this points it the other way.
+      #
+      # It runs here rather than in a plain job because its Postgres half needs a
+      # live server. That half skips itself when one is missing, so the script is
+      # safe anywhere — but this is the only job where it covers the engine with
+      # the most for the generator to work with: real parameter types, real
+      # nullability from `pg_attribute`, and types SQLite does not have.
+      #
+      # It existed and had never run in CI.
+      - name: Generated code must compile
+        run: ./Scripts/codegen-tests.sh
       # Runs even when the suite fails: the server logs are usually the only
       # record of why, and a failed job that discards them costs another whole
       # cycle to reproduce.
@@ -410,39 +424,30 @@ jobs:
       - name: Build
         run: swift build --build-tests
 
-      # Runs *before* the full suite, alone, and answers one question.
+      # **Authoritative, not diagnostic.** These tests measure wall-clock
+      # duration because duration is the only observable they have: a correct TLS
+      # close takes ~0.25s (`tlsShutdownTimeout`) and the bug they guard against
+      # took 5.0s waiting for a `close_notify` that never comes. There is no
+      # error to assert on instead.
       #
-      # Two timing tests failed the last run at 19.12s and 19.13s against a
-      # ten-second bound. Near-identical numbers from tests that execute in
-      # parallel points at a shared resource rather than at either being slow, and
-      # 19 seconds is not explicable as ordinary scheduler noise — the entire
-      # suite runs in 132 seconds on this runner.
+      # They are skipped in the parallel suite and run here, alone, because the
+      # contention is measured rather than suspected: the same tests pass in
+      # 0.053-0.145s in isolation and take 19-26s inside the full run. Every
+      # previous response was to widen the bound — 2s to 3s, 10s to 30s — which
+      # produced tests that measured the runner and still failed.
       #
-      # One of the two touches no database at all: `withQueryTimeout(50ms)` around
-      # a `Task.sleep`. So the delay is in the timeout path or in the runtime under
-      # it, and the driver has been blamed for it through five attempted fixes.
-      #
-      # The hypothesis is cooperative thread-pool starvation: these runners are
-      # three-core, the suite runs CPU-bound SQLite queries in parallel, and a
-      # starved runtime delays cancellation delivery no matter how correct the code
-      # is. This step tests that and nothing else.
-      #
-      #   passes alone, fails in the suite  → contention from our own tests
-      #   fails alone                       → the timeout path is genuinely broken,
-      #                                       and deleting the test would have
-      #                                       buried it
-      #
-      # `continue-on-error` because the answer is the point, not the verdict: a red
-      # cross here would say the same thing twice while hiding the full-suite
-      # result underneath it.
-      - name: Timeout cancellation, in isolation
-        continue-on-error: true
+      # No `continue-on-error`. If a timeout genuinely stops bounding anything,
+      # that is a driver bug and this is the step that says so.
+      - name: Timing-sensitive tests, alone
+        env:
+          SWIZZLE_TIMING: "1"
         run: |
-          echo "── the deterministic one: does cancellation reach the body at all"
+          echo "── cancellation reaches the body at all"
           swift test --filter "QueryTimeoutCancellationTests"
-          echo "── the timed ones, alone, with nothing else competing"
+          echo "── the timed ones, with nothing else competing"
           swift test --filter "returnsWithoutAwaitingTheBody"
           swift test --filter "timeoutActuallyInterrupts"
+          swift test --filter "tlsCloseIsPrompt"
 
       # Same skipping behaviour as Linux — no fixtures here either. The macOS job
       # earns its place by covering the Darwin-only halves of the `#if

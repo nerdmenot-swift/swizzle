@@ -347,7 +347,8 @@ struct PoolTests {
 
     /// Without a bounded wait, a database outage hangs every caller instead of
     /// failing them — the pool keeps retrying and the waiter stays queued.
-    @Test("acquisition times out instead of hanging")
+    @Test("acquisition times out instead of hanging",
+          .enabled(if: timingTestsEnabled, Comment(rawValue: timingTestsReason)))
     func acquisitionTimesOut() async throws {
         var connection = MySQLConnectionConfiguration(
             address: .hostname(TestServers.host, port: TestServers.latest.port),

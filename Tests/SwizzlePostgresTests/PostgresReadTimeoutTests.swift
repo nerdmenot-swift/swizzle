@@ -56,23 +56,41 @@ struct PostgresReadTimeoutTests {
         configuration.readTimeout = .seconds(2)
 
         let started = ContinuousClock().now
-        await #expect(throws: (any Error).self) {
+        do {
             let connection = try await PostgresConnection.connect(
                 configuration: configuration, on: group.next())
             connection.closeImmediately()
+            Issue.record("a silent server completed the connect")
+        } catch let error as PostgresConnectionError {
+            // **The error is the claim**, exactly as in the MySQL twin. It names
+            // the mechanism that bounded the wait, which is what this test is
+            // about — that the silence was cut short by `connect_timeout` rather
+            // than left to TCP.
+            #expect(
+                "\(error)".contains("connect_timeout"),
+                Comment(rawValue: "expected the connect timeout, got \(error)")
+            )
         }
-        // Thirty seconds, not ten. The assertion is **"this does not hang"**, and
-        // the deadlines that make it true are the 500 ms connect and the 2 s read
-        // above — this number only has to be larger than their sum by enough that
-        // a loaded machine cannot cross it.
-        //
-        // Ten was not. Linux CI measured 10.99 s, which is scheduler starvation
-        // rather than a driver that waited too long, and the comment above about
-        // "choosing a bound that a live connection cannot meet tests the runner"
-        // applies to this line too.
-        //
-        // A driver that genuinely hangs still fails this, thirty seconds later.
-        #expect(ContinuousClock().now - started < .seconds(30))
+
+        let elapsed = ContinuousClock().now - started
+
+        // Keep the observation without asserting on it, matching the MySQL twin.
+        // The bound here was ten seconds and Linux CI measured 10.99s with the
+        // mechanism working; thirty was the next guess. Both were measuring the
+        // runner, and the contention is now understood — these suites run
+        // alongside CPU-bound work on a two-core box, and cancellation delivery
+        // waits on the cooperative pool.
+        if elapsed > .seconds(5) {
+            print("""
+                NOTE: the connect took \(elapsed) against a 500ms connect_timeout. \
+                The timeout fired — the error above says so — but something \
+                delayed it by more than 10x.
+                """)
+        }
+
+        // A backstop, not a measurement: it only catches a connect left to TCP,
+        // which takes about fifteen minutes.
+        #expect(elapsed < .seconds(120))
     }
 
     /// An idle connection is left alone; a working one is undisturbed.

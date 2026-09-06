@@ -108,13 +108,24 @@ func f() { _ = DeleteQuery<SQLite, Users>(from: users).limit(1) }'
 echo ""
 echo "═══ Column types must be enforced"
 
-expect_error "wrong_literal_type" "error:" '
+# These three assert a **specific type mismatch**, not merely that something
+# failed to compile.
+#
+# They read `"error:"` before, which every compile failure satisfies — including
+# a module built by a different compiler version and a missing SDK, both of which
+# happen routinely on a machine with more than one toolchain. A gate that passes
+# because the build environment is broken is worse than no gate: it reports
+# success for the one claim the builder's whole design rests on.
+#
+# The expected strings name the types the compiler actually reports, so the gate
+# fails if the rejection stops being about types.
+expect_error "wrong_literal_type" "SQLExpression<Int64>' to expected argument type 'SQLExpression<String?>" '
 func f() { _ = pg.select(users.id).from(users).where(users.age == "not a number") }'
 
-expect_error "mismatched_column_comparison" "error:" '
+expect_error "mismatched_column_comparison" "SQLExpression<Int64>' to expected argument type 'SQLExpression<String>" '
 func f() { _ = pg.select(users.id).from(users).where(users.name == users.age) }'
 
-expect_error "wrong_decoded_tuple" "error:" '
+expect_error "wrong_decoded_tuple" "(Int64, String)' to specified type '(String, String)" '
 func f() throws { let _: (String, String) = try pg.select(users.id, users.name).from(users).decode(SQLRow(values: [])) }'
 
 echo ""

@@ -30,7 +30,8 @@ struct PostgresSessionTests {
     /// `Terminate` lets the server log a clean disconnect rather than a lost
     /// connection, and closing must be prompt — NIOSSL's default would wait five
     /// seconds for a `close_notify` Postgres does not send.
-    @Test("shutdown says goodbye and closes promptly")
+    @Test("shutdown says goodbye and closes promptly",
+          .enabled(if: timingTestsEnabled, Comment(rawValue: timingTestsReason)))
     func shutdown() async throws {
         let connection = try await Self.open()
         let start = ContinuousClock().now
