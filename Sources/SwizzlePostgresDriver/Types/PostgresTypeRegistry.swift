@@ -223,7 +223,10 @@ public final class PostgresTypeRegistry: Sendable {
     /// `pg_attribute` again — the field *names* need the catalogue, the values do
     /// not.
     func decodeComposite(_ buffer: inout ByteBuffer) -> SQLValue? {
-        guard let count: Int32 = buffer.readInteger(), count >= 0 else { return nil }
+        // Each field is an OID and a length, so eight bytes minimum. Without this
+        // the reserve below is an allocation the peer picked with four bytes.
+        guard let count: Int32 = buffer.readInteger(), count >= 0,
+              Int(count) <= buffer.readableBytes / 8 else { return nil }
         var parts: [String] = []
         parts.reserveCapacity(Int(count))
 

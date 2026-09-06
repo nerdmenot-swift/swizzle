@@ -225,7 +225,11 @@ enum PostgresExtendedTypes {
         // way to reach the registry from here.
         decodeElement: ((_ bytes: [UInt8], _ oid: UInt32) -> SQLValue?)? = nil
     ) -> SQLValue? {
-        guard let count: Int32 = buffer.readInteger(), count >= 0 else { return nil }
+        // Each range that follows is length-prefixed, so it cannot be under four
+        // bytes — a count larger than the remaining bytes allow is malformed, and
+        // reserving on it would be a 32 GB allocation chosen by the peer.
+        guard let count: Int32 = buffer.readInteger(), count >= 0,
+              Int(count) <= buffer.readableBytes / 4 else { return nil }
 
         var ranges: [String] = []
         ranges.reserveCapacity(Int(count))

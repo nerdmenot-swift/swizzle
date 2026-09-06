@@ -84,8 +84,21 @@ public enum PostgresArrayDecoder {
                   length >= 0
             else { return nil }
             dimensions.append(.init(length: length, lowerBound: lowerBound))
-            total *= Int(length)
+            // The product is the peer's arithmetic, not ours: three dimensions
+            // of Int32.max overflow `Int` and **trap**, taking the process down
+            // from one malformed array header.
+            let (product, overflowed) = total.multipliedReportingOverflow(by: Int(length))
+            guard !overflowed else { return nil }
+            total = product
         }
+
+        // Every element carries at least a four-byte length prefix — `-1` for a
+        // NULL, which is the smallest an element can be — so a header claiming
+        // more elements than the remaining bytes could possibly hold is
+        // malformed rather than large. Checking it here rather than discovering
+        // it element by element is what stops `reserveCapacity` below being an
+        // allocation the peer chose.
+        guard total <= buffer.readableBytes / 4 else { return nil }
 
         var elements: [SQLValue] = []
         elements.reserveCapacity(total)
