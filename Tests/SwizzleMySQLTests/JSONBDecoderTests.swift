@@ -534,7 +534,7 @@ struct JSONBDecoderTests {
     /// Random bytes, seeded so a failure reproduces. The only assertion is that
     /// the decoder returns — a wrong rendering of garbage is not a finding, and
     /// a trap is.
-    @Test("no random document traps the decoder", arguments: [UInt64](1...16))
+    @Test("no random document traps the decoder", arguments: fuzzSeeds(16))
     func randomDocumentsAreSafe(seed: UInt64) {
         var state = seed &* 6_364_136_223_846_793_005 &+ 1
         func next() -> UInt64 {

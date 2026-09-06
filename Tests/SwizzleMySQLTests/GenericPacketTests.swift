@@ -288,7 +288,7 @@ struct GenericPacketTests {
     }
 
     /// Random bodies, seeded so a failure reproduces.
-    @Test("no random OK body traps the parser", arguments: [UInt64](1...12))
+    @Test("no random OK body traps the parser", arguments: fuzzSeeds(12))
     func randomBodiesAreSafe(seed: UInt64) {
         var state = seed &* 6_364_136_223_846_793_005 &+ 1
         func next() -> UInt64 {

@@ -64,7 +64,7 @@ struct DecoderFuzzTests {
     /// `decodeText` takes the bytes between length prefixes, so its input is
     /// arbitrary by construction: a `DECIMAL` column can carry anything the
     /// server put there, and the driver parses it.
-    @Test("no random input traps the text decoder", arguments: [UInt64](1...12))
+    @Test("no random input traps the text decoder", arguments: fuzzSeeds(12))
     func textDecoderSurvivesRandomBytes(seed: UInt64) {
         var generator = Seeded(seed: seed)
         for _ in 0..<400 {
@@ -82,7 +82,7 @@ struct DecoderFuzzTests {
 
     /// `decodeBinary` reads its own lengths from the buffer, which is the shape
     /// that goes wrong: a length byte says eleven and four bytes remain.
-    @Test("no random input traps the binary decoder", arguments: [UInt64](1...12))
+    @Test("no random input traps the binary decoder", arguments: fuzzSeeds(12))
     func binaryDecoderSurvivesRandomBytes(seed: UInt64) {
         var generator = Seeded(seed: seed)
         for _ in 0..<400 {
@@ -99,7 +99,7 @@ struct DecoderFuzzTests {
     /// The temporal decoders specifically, because their length prefix is the
     /// thing that decides how many further reads happen — the classic shape for
     /// reading past the end.
-    @Test("no random input traps the temporal decoders", arguments: [UInt64](1...12))
+    @Test("no random input traps the temporal decoders", arguments: fuzzSeeds(12))
     func temporalDecodersSurviveRandomBytes(seed: UInt64) {
         var generator = Seeded(seed: seed)
         for _ in 0..<400 {

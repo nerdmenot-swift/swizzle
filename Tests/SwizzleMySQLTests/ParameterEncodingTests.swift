@@ -236,7 +236,7 @@ struct ParameterEncodingTests {
     /// reproduces. The hand-picked shapes above cover the branches; this covers
     /// the combinations nobody thought to list.
     @Test("random temporal values round trip and declare their own length",
-          arguments: [UInt64](1...8))
+          arguments: fuzzSeeds(8))
     func randomTemporalsRoundTrip(seed: UInt64) throws {
         var state = seed &* 6_364_136_223_846_793_005 &+ 1
         func next() -> UInt64 {

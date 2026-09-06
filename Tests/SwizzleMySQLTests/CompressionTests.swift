@@ -531,7 +531,7 @@ struct CompressedProtocolTests {
 
     /// Random bytes into both decompressors, seeded. A corrupt frame must
     /// produce an error rather than a trap or an over-long write.
-    @Test("no random frame traps either decompressor", arguments: [UInt64](1...8))
+    @Test("no random frame traps either decompressor", arguments: fuzzSeeds(8))
     func randomFramesAreSafe(seed: UInt64) {
         var state = seed &* 6_364_136_223_846_793_005 &+ 1
         func next() -> UInt64 {

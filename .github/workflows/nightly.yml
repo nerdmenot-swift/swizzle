@@ -24,7 +24,16 @@ on:
     # 02:00 UTC. Nothing depends on the hour; it is simply outside the window
     # where somebody is likely to be pushing and competing for runners.
     - cron: "0 2 * * *"
+    # Sundays, for the mutation sweep alone — it is measured in hours, and
+    # GitHub has no per-job schedule, so the jobs below select on which cron
+    # woke them.
+    - cron: "0 3 * * 0"
   workflow_dispatch:
+    inputs:
+      run_mutation:
+        description: "Also run the mutation sweep (hours, not minutes)"
+        type: boolean
+        default: false
 
 concurrency:
   group: nightly
@@ -38,6 +47,9 @@ jobs:
   # five runs tells you a flake exists without telling you what it was, which is
   # the position we were in for weeks.
   flake-detection:
+    # Nightly cron, or a manual run. Not the Sunday cron, which exists only to
+    # wake the mutation sweep.
+    if: github.event.schedule != '0 3 * * 0'
     name: Flake detection (suite x5)
     runs-on: ubuntu-latest
     container: swift:6.3.3
@@ -112,6 +124,9 @@ jobs:
   # network drivers flows through. A single number hides exactly the case worth
   # seeing.
   coverage:
+    # Nightly cron, or a manual run. Not the Sunday cron, which exists only to
+    # wake the mutation sweep.
+    if: github.event.schedule != '0 3 * * 0'
     name: Coverage by module
     runs-on: ubuntu-latest
     container: swift:6.3.3
@@ -164,3 +179,171 @@ jobs:
           echo "═══ Total"
           llvm-cov report "$BIN" -instr-profile "$PROF" \
             -ignore-filename-regex='(Tests|\.build|CSodium|examples)' 2>/dev/null | tail -1
+
+  # ── Are there data races? ──────────────────────────────────────────────────
+  #
+  # Nothing ran a sanitizer before this, in a project with `@unchecked
+  # Sendable`, a serial dispatch queue owning a `NOMUTEX` SQLite handle, hand-
+  # rolled locks, and a C shim. TSan found a real one on its first run: 36
+  # reports in the SQLite concurrency suites, every one bottoming out in
+  # `sqlite3MutexInit` — two threads opening connections at once both entering
+  # SQLite's global setup, which builds the mutex system and therefore runs
+  # before there is a mutex to protect it. The suite was green throughout.
+  thread-sanitizer:
+    # Nightly cron, or a manual run. Not the Sunday cron, which exists only to
+    # wake the mutation sweep.
+    if: github.event.schedule != '0 3 * * 0'
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    container: swift:6.3.3
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fixture dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq curl libaio1t64 libncurses6 libnuma1 xz-utils
+          ARCH=$(uname -m)
+          ln -sf /usr/lib/$ARCH-linux-gnu/libaio.so.1t64 /usr/lib/$ARCH-linux-gnu/libaio.so.1
+
+      - name: Cache database distributions
+        uses: actions/cache@v4
+        with:
+          path: .testservers/dist-linux-x86_64
+          key: testservers-dist-${{ runner.os }}-${{ hashFiles('testservers/servers.conf') }}
+
+      - name: Start the fixtures
+        run: ./Scripts/test-servers.sh up
+
+      # A threshold rather than a suppressions file, deliberately.
+      #
+      # Two reports survive on a clean tree, both in continuation resumption:
+      # an async task frame written by one executor thread and read by another
+      # inside `UnsafeContinuation.resume`. The happens-before there is
+      # established by the Swift runtime, and `libswift_Concurrency` is not
+      # TSan-instrumented, so TSan cannot see it. They look like the documented
+      # blind spot rather than a defect — but "looks like" is not "is", so they
+      # are counted rather than silenced.
+      #
+      # Suppressing them by pattern would hide any future race that happens to
+      # resume a continuation, which is most of them. A count that must not grow
+      # keeps them visible and still fails on a new one. If the number moves in
+      # either direction, read the reports: they are printed in full above the
+      # summary.
+      - name: Test under ThreadSanitizer
+        run: |
+          set +e
+          swift test --sanitize=thread > /tmp/tsan.log 2>&1
+          set -e
+
+          echo "── every report, in full ──"
+          grep -B 2 -A 24 "WARNING: ThreadSanitizer" /tmp/tsan.log || echo "  (none)"
+
+          count=$(grep -c "WARNING: ThreadSanitizer" /tmp/tsan.log || true)
+          known=2
+          echo ""
+          echo "═══ $count report(s); $known known and triaged"
+          if [ "$count" -gt "$known" ]; then
+            echo "New data race(s) — read the reports above."
+            exit 1
+          fi
+
+  # ── Is the fuzzing still finding anything? ─────────────────────────────────
+  #
+  # The fuzz suites run fixed seeds on every push, which makes them a fast
+  # regression check and nothing else: the same inputs, forever. They found real
+  # bugs when written — a length-encoded integer above `Int64.max`, an array
+  # header that overflowed on multiplication — and having found them they cannot
+  # find another.
+  #
+  # Here the whole seed range is shifted, so each night explores input no
+  # previous run has seen. The base is printed and is the only thing needed to
+  # replay a failure exactly, which is the difference between a fuzzer and a
+  # lottery.
+  fuzzing:
+    # Nightly cron, or a manual run. Not the Sunday cron, which exists only to
+    # wake the mutation sweep.
+    if: github.event.schedule != '0 3 * * 0'
+    name: Fuzzing (fresh seeds)
+    runs-on: ubuntu-latest
+    container: swift:6.3.3
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Fuzz
+        run: |
+          # Derived from the run number, so it is different every night and
+          # recoverable from the run afterwards.
+          SEED=$(( ${{ github.run_number }} * 100003 ))
+          echo "═══ SWIZZLE_FUZZ_SEED=$SEED"
+          echo "    To reproduce any failure below:"
+          echo "    SWIZZLE_FUZZ_SEED=$SEED swift test --filter <the test>"
+          echo ""
+          SWIZZLE_FUZZ_SEED=$SEED swift test --filter \
+            "DecoderFuzzTests|JSONBDecoderTests|GenericPacketTests|WireLengthBoundsTests|RowsEventFramingTests|ParameterEncodingTests|PostgresMalformedInputTests"
+
+  # ── Would a bug actually be caught? ────────────────────────────────────────
+  #
+  # Coverage says a line ran. Mutation says the suite would have *noticed* it
+  # being wrong, which is the only question that matters and the only one a
+  # green run cannot answer. Weekly rather than nightly because it is measured
+  # in hours, not minutes.
+  #
+  # The score is currently known for MySQL (82.3%) and unknown for Postgres and
+  # SQLite, which is the gap this closes.
+  #
+  # **The filters are a compromise, and the report says so.** A full sweep of
+  # `SwizzleMySQL` against the whole suite is roughly fifteen hours, well past
+  # the six-hour job limit, so the drivers are swept against their unit tests
+  # only. That makes the survivor list a *superset* of the true one: anything a
+  # driver's integration suites would have caught is counted as surviving here.
+  # A survivor from this job is therefore a question, not a verdict — but a
+  # mutant that dies against unit tests alone is unambiguously dead.
+  mutation:
+    # The Sunday cron, or a manual run that asked for it. A six-hour matrix
+    # should not start because somebody wanted to re-check a flake.
+    if: >-
+      github.event.schedule == '0 3 * * 0' ||
+      inputs.run_mutation
+    name: Mutation (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    container: swift:6.3.3
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: SwizzleCore
+            filter: ""
+          - target: SwizzleQuery
+            filter: ""
+          - target: SwizzleGenerate
+            filter: SwizzleGenerateTests
+          - target: SwizzleMigrate
+            filter: SwizzleMigrateTests
+          - target: SwizzleSQLite
+            filter: SwizzleSQLiteTests
+          - target: SwizzlePostgresDriver
+            filter: SwizzlePostgresDriverTests
+          - target: SwizzleMySQL
+            filter: SwizzleMySQLTests
+    steps:
+      - uses: actions/checkout@v4
+
+      # `continue-on-error` because a survivor is not a build failure. The score
+      # is the artefact; a red cross would say "there is untested code", which
+      # is true of every codebase and tells nobody anything.
+      - name: Sweep
+        continue-on-error: true
+        run: |
+          ./Scripts/mutation-sweep.sh "Sources/${{ matrix.target }}" "${{ matrix.filter }}" \
+            | tee /tmp/sweep.log
+
+          echo ""
+          echo "═══ ${{ matrix.target }}"
+          grep -E "mutants:|killed:|survived:|score:" /tmp/sweep.log || true

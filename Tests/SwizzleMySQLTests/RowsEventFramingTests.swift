@@ -297,7 +297,7 @@ struct RowsEventFramingTests {
     }
 
     /// Random bodies through both event types, seeded.
-    @Test("no random rows event traps the decoder", arguments: [UInt64](1...8))
+    @Test("no random rows event traps the decoder", arguments: fuzzSeeds(8))
     func randomEventsAreSafe(seed: UInt64) {
         var state = seed &* 6_364_136_223_846_793_005 &+ 1
         func next() -> UInt64 {

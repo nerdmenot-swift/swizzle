@@ -194,7 +194,7 @@ struct StatusVariableParsingTests {
     ///
     /// The parser's contract is that it always returns — it has no error path,
     /// only `break loop` — so the only thing to assert is that it does.
-    @Test("no random block traps or hangs the parser", arguments: [UInt64](1...16))
+    @Test("no random block traps or hangs the parser", arguments: fuzzSeeds(16))
     func randomBlocksAreSafe(seed: UInt64) {
         var state = seed &* 6_364_136_223_846_793_005 &+ 1
         func next() -> UInt64 {

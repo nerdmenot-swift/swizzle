@@ -224,7 +224,7 @@ struct WireLengthBoundsTests {
 
     /// Random headers, seeded. The field ids are biased low so the walk reaches
     /// the length reads rather than falling into the default arm every time.
-    @Test("no random transaction-payload header traps", arguments: [UInt64](1...8))
+    @Test("no random transaction-payload header traps", arguments: fuzzSeeds(8))
     func randomCompressionHeaders(seed: UInt64) {
         var state = seed &* 6_364_136_223_846_793_005 &+ 1
         func next() -> UInt64 {

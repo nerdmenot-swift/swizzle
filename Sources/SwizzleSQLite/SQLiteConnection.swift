@@ -67,6 +67,26 @@ public final class SQLiteConnection: @unchecked Sendable {
     ///     deadlock against the writer, and catching it at the connection is far
     ///     clearer than catching it at 3am.
     public init(path: String, busyTimeout: TimeInterval = 5, readOnly: Bool = false) throws {
+        // SQLite's one-time global setup, forced to happen exactly once.
+        //
+        // `sqlite3_open_v2` calls `sqlite3_initialize()` itself, and that
+        // routine builds the mutex system — so it runs *before* there is any
+        // mutex to protect it. Two threads opening connections at the same
+        // moment both enter it and write the same globals, which is a real
+        // write-write race and not a theoretical one: the reader pool opens its
+        // connections concurrently, so it is the ordinary path rather than a
+        // corner.
+        //
+        // ThreadSanitizer found it on its first run against the concurrency
+        // suites — 36 reports, every one bottoming out in `sqlite3MutexInit`.
+        // The tests passed throughout; a race is invisible to a suite that only
+        // checks results.
+        //
+        // A Swift global `let` is initialised through `swift_once`, so this is
+        // the guarantee SQLite wants: one thread completes initialisation before
+        // any other proceeds.
+        _ = sqliteGlobalInitialization
+
         var pointer: OpaquePointer?
         let flags = readOnly
             ? SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX
@@ -779,3 +799,17 @@ extension SQLiteConnection {
         }
     }
 }
+
+/// Runs SQLite's global initialisation once, before any connection opens.
+///
+/// Referenced from `SQLiteConnection.init`; the reference is the point, since a
+/// global `let` in Swift is initialised lazily through `swift_once` and that is
+/// exactly the run-once, happens-before guarantee `sqlite3_initialize()` needs
+/// and does not provide for itself.
+///
+/// The result is deliberately ignored at the call site. A failure here means
+/// SQLite could not set itself up at all, and the very next `sqlite3_open_v2`
+/// reports it with a real error code and message — which is a better diagnostic
+/// than anything this could throw, and keeps the initialiser's failure path in
+/// one place.
+let sqliteGlobalInitialization: Int32 = sqlite3_initialize()

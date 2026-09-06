@@ -83,7 +83,7 @@ struct PostgresMalformedInputTests {
 
     // MARK: - Random input
 
-    @Test("no random input traps any binary decoder", arguments: [UInt64](1...16))
+    @Test("no random input traps any binary decoder", arguments: fuzzSeeds(16))
     func randomBytesAreSafe(seed: UInt64) {
         var generator = Seeded(seed: seed)
         for _ in 0..<300 {
