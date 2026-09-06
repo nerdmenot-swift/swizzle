@@ -219,6 +219,14 @@ let package = Package(
             exclude: ["LICENSE-postgres-nio.txt", "README.md"]
         ),
 
+        // The pool arrived vendored *without* upstream's tests, and it showed:
+        // 50.7% covered, with the uncovered half being the rare-path logic —
+        // establish failure, backoff, keep-alive, idle timeout, graceful
+        // shutdown. That is the component every query on both network drivers
+        // flows through, and those are exactly the paths that only run when
+        // something has already gone wrong.
+        .testTarget(name: "SwizzleConnectionPoolTests", dependencies: ["SwizzleConnectionPool"]),
+
         // libsodium's ref10 Edwards25519, vendored (ISC — see
         // Sources/CSodiumEd25519/LIBSODIUM-LICENSE).
         //
