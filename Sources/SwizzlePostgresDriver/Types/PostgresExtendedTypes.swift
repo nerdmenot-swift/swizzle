@@ -286,6 +286,15 @@ enum PostgresExtendedTypes {
     // MARK: - Geometric
 
     static func decodeDoubles(_ buffer: inout ByteBuffer, count: Int) -> [Double]? {
+        // `path` and `polygon` take this count straight off the wire, so it is an
+        // allocation the peer chose. Each double is eight bytes, so a count the
+        // buffer cannot supply is malformed — and reserving on it *before* the
+        // first read is a 32 GB request.
+        //
+        // macOS overcommits and survived this; Linux aborts. The bug was invisible
+        // locally and only the Linux job could see it, which is worth remembering
+        // the next time an allocation bound looks untestable.
+        guard count >= 0, count <= buffer.readableBytes / 8 else { return nil }
         var values: [Double] = []
         values.reserveCapacity(count)
         for _ in 0..<count {
