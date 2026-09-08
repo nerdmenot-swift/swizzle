@@ -508,4 +508,171 @@ struct ConnectionStateTests {
         #expect(state.close() != nil)
         #expect(state.close() == nil)
     }
+
+    // MARK: - Parking in the remaining states
+
+    /// Parking a connection that already has a keep-alive scheduled and no idle
+    /// timer arms just the idle timer. This is the arm whose timer was
+    /// mislabelled; it is pinned here from the other direction, by what it
+    /// returns rather than by what the label routes to.
+    @Test("parking with a keep-alive already scheduled arms only the idle timer")
+    func parkWithKeepAliveAlreadyScheduled() {
+        var (state, _) = Self.connected()
+        _ = state.parkConnection(scheduleKeepAliveTimer: true, scheduleIdleTimeoutTimer: false)
+
+        let timers = Array(
+            state.parkConnection(scheduleKeepAliveTimer: false, scheduleIdleTimeoutTimer: true)
+        )
+        #expect(timers.count == 1)
+        #expect(timers.first?.usecase == .idleTimeout)
+    }
+
+    /// Parking a connection that already has both is a no-op. The pool parks on
+    /// every release, so this runs constantly; arming a second pair each time
+    /// would leak a timer per query.
+    @Test("re-parking a fully armed connection arms nothing")
+    func reparkFullyArmed() {
+        var (state, _) = Self.connected()
+        _ = state.parkConnection(scheduleKeepAliveTimer: true, scheduleIdleTimeoutTimer: true)
+        #expect(
+            Array(state.parkConnection(scheduleKeepAliveTimer: false, scheduleIdleTimeoutTimer: false))
+                .isEmpty
+        )
+    }
+
+    /// Same again while the keep-alive is actually running rather than pending.
+    @Test("re-parking with a keep-alive running and an idle timer armed arms nothing")
+    func reparkWithRunningKeepAliveAndIdleTimer() {
+        var (state, _) = Self.connected()
+        _ = state.parkConnection(scheduleKeepAliveTimer: true, scheduleIdleTimeoutTimer: true)
+        _ = state.runKeepAliveIfIdle(reducesAvailableStreams: false)
+        #expect(
+            Array(state.parkConnection(scheduleKeepAliveTimer: false, scheduleIdleTimeoutTimer: false))
+                .isEmpty
+        )
+    }
+
+    // MARK: - What each state reports about itself
+
+    /// The predicates the pool routes on, across the whole lifecycle. They are
+    /// read at almost every decision point, so a state that answers wrongly is
+    /// not a local bug — it sends the pool down the wrong branch everywhere.
+    @Test("each state reports itself accurately")
+    func statePredicates() {
+        var starting = State(id: 1)
+        #expect(!starting.isIdle && !starting.isAvailable && !starting.isLeased)
+        #expect(!starting.isDraining && !starting.isConnected && !starting.isClosed)
+
+        var backingOff = State(id: 2)
+        _ = backingOff.failedToConnect()
+        #expect(!backingOff.isIdle && !backingOff.isAvailable && !backingOff.isLeased)
+        #expect(!backingOff.isDraining && !backingOff.isConnected && !backingOff.isClosed)
+
+        var (idle, _) = Self.connected(maxStreams: 2)
+        #expect(idle.isIdle && idle.isAvailable && idle.isConnected)
+        #expect(!idle.isLeased && !idle.isDraining && !idle.isClosed)
+
+        var (leased, _) = Self.connected(maxStreams: 2)
+        _ = leased.lease(streams: 1)
+        #expect(leased.isLeased && leased.isConnected)
+        #expect(leased.isAvailable, "one of its two streams is still free")
+        #expect(!leased.isIdle && !leased.isDraining && !leased.isClosed)
+
+        var (saturated, _) = Self.connected(maxStreams: 1)
+        _ = saturated.lease(streams: 1)
+        #expect(saturated.isLeased && !saturated.isAvailable, "its only stream is taken")
+
+        var (draining, _) = Self.connected(maxStreams: 2)
+        _ = draining.lease(streams: 1)
+        _ = draining.markForClose()
+        #expect(draining.isDraining)
+        #expect(!draining.isAvailable, "it is on its way out; nothing new goes on it")
+        #expect(
+            draining.isLeased,
+            "still leased: streams are still outstanding on it, and draining is a promise to close once they come back"
+        )
+        #expect(!draining.isIdle && !draining.isClosed)
+
+        var (closing, _) = Self.connected()
+        _ = closing.close()
+        #expect(!closing.isAvailable && !closing.isIdle && !closing.isLeased)
+        #expect(!closing.isDraining)
+    }
+
+    /// Closing a draining connection reports **no maximum**, because there is no
+    /// capacity left to give back — the pool has already stopped counting its
+    /// streams as available. Reporting the real maximum here would credit the
+    /// pool with capacity on a connection that is on its way out.
+    @Test("closing a draining connection reports no available capacity")
+    func closeWhileDraining() {
+        var (state, connection) = Self.connected(maxStreams: 4)
+        _ = state.lease(streams: 2)
+        _ = state.markForClose()
+
+        guard let close = state.close() else {
+            Issue.record("a draining connection should close")
+            return
+        }
+        #expect(close.connection === connection)
+        #expect(close.maxStreams == 0, "no capacity to credit back")
+        #expect(close.usedStreams == 2, "but the outstanding streams are still reported")
+        #expect(!close.runningKeepAlive)
+    }
+
+    // MARK: - Equality of the action payloads
+
+    /// `KeepAliveAction`, `LeaseAction` and `CloseAction` all carry hand-written
+    /// equality, and none of it was reachable from a test — the suites all
+    /// pattern match. Hand-written `==` degrades quietly into "the cases match",
+    /// so each is pinned on the fields it does compare.
+    ///
+    /// `CloseAction` deliberately compares only its connection, its timers and
+    /// its maximum — `usedStreams`, `previousConnectionState` and
+    /// `runningKeepAlive` are *not* compared. That is worth knowing before
+    /// leaning on it: two close actions that differ only in whether a keep-alive
+    /// was running are equal, so a test comparing whole actions cannot catch a
+    /// regression in that field.
+    @Test("the action payloads compare on the fields they claim to")
+    func actionPayloadEquality() {
+        let connection = MockConnection(id: 1)
+        let twin = MockConnection(id: 1)
+
+        typealias KeepAlive = TestStateMachine.KeepAliveAction
+        #expect(KeepAlive(connection: connection, keepAliveTimerCancellationContinuation: 1)
+            == KeepAlive(connection: connection, keepAliveTimerCancellationContinuation: 1))
+        #expect(KeepAlive(connection: connection, keepAliveTimerCancellationContinuation: 1)
+            != KeepAlive(connection: twin, keepAliveTimerCancellationContinuation: 1))
+        #expect(KeepAlive(connection: connection, keepAliveTimerCancellationContinuation: 1)
+            != KeepAlive(connection: connection, keepAliveTimerCancellationContinuation: 2))
+
+        typealias Lease = State.LeaseAction
+        #expect(Lease(connection: connection, timersToCancel: .init(), wasIdle: true)
+            == Lease(connection: connection, timersToCancel: .init(), wasIdle: true))
+        #expect(Lease(connection: connection, timersToCancel: .init(), wasIdle: true)
+            != Lease(connection: connection, timersToCancel: .init(), wasIdle: false))
+        #expect(Lease(connection: connection, timersToCancel: .init(), wasIdle: true)
+            != Lease(connection: twin, timersToCancel: .init(), wasIdle: true))
+        #expect(Lease(connection: connection, timersToCancel: .init(1), wasIdle: true)
+            != Lease(connection: connection, timersToCancel: .init(2), wasIdle: true))
+
+        typealias Close = State.CloseAction
+        func close(
+            _ connection: MockConnection, timers: Max2Sequence<Int> = .init(),
+            maxStreams: UInt16 = 4, usedStreams: UInt16 = 0, keepAlive: Bool = false
+        ) -> Close {
+            Close(
+                connection: connection, previousConnectionState: .idle, cancelTimers: timers,
+                usedStreams: usedStreams, maxStreams: maxStreams, runningKeepAlive: keepAlive
+            )
+        }
+        #expect(close(connection) == close(connection))
+        #expect(close(connection) != close(twin))
+        #expect(close(connection) != close(connection, timers: .init(1)))
+        #expect(close(connection) != close(connection, maxStreams: 8))
+        #expect(
+            close(connection, usedStreams: 0, keepAlive: false)
+                == close(connection, usedStreams: 3, keepAlive: true),
+            "documented: neither the used streams nor the keep-alive flag is compared"
+        )
+    }
 }
