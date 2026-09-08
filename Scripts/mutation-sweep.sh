@@ -322,5 +322,21 @@ if [[ $((killed + survived)) -gt 0 ]]; then
   echo "  score:        $(awk -v k="$killed" -v s="$survived" 'BEGIN{printf "%.1f%%", 100*k/(k+s)}')"
 fi
 echo
+
+# A score of exactly zero almost never means the code is untested. It means the
+# tests that were run do not execute the code that was mutated — a wrong filter,
+# or a target whose tests live somewhere else entirely.
+#
+# The coverage precheck above is best-effort: it needs profiling data, and a
+# sweep runs against a clean checkout that may not have any. This one cannot
+# fail to fire, which is the point — the check that matters is the one that still
+# works when the clever one is unavailable.
+if [[ $killed -eq 0 && $survived -gt 0 ]]; then
+  echo "  NOTE: nothing was killed. Before reading that as a result about the"
+  echo "  code, check that '$FILTER' actually runs tests which exercise"
+  echo "  $TARGET. Every previous zero here was a filter that did not."
+  echo
+fi
+
 [[ $survived -gt 0 ]] && echo "Survivors listed in $REPORT"
 exit 0
