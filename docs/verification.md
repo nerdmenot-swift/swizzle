@@ -143,3 +143,47 @@ that fails when the threshold is ignored, checked by ignoring it on purpose.
 
 That is the failure mode this whole file is about, in miniature: eight passing
 tests about a feature, none of which could tell whether half of it worked.
+
+## Triage of the SwizzleConnectionPool survivors
+
+All 42 from the run above, so the next person does not re-derive it.
+
+**Cannot change the built binary (9).** `NIOLock.swift` lines 56, 74, 86, 98 —
+every one mutates the `#elseif (compiler(<6.1) && !os(WASI)) || ...` condition.
+That is a compile-time selection in vendored NIO code, not runtime logic.
+
+**Equivalent at the boundary (roughly a dozen).** Comparisons where both
+operators compute the same answer at the only value that differs. Examples:
+`closedAction.maxStreams >= closedAction.usedStreams` and
+`max >= used ? max - used : 0` both yield zero at equality; `maxStreams >=
+info.oldMaxStreams` adds zero on one branch and subtracts zero on the other;
+`connections.count > softLimit` relaxed to `>=` searches an empty range.
+
+**Dead by construction (2).** `if retry || self.stats.active < minimum` — the
+only caller passes `retry: true`, so the right-hand side never runs. Recorded
+rather than "fixed": the branch is reachable if a second caller ever appears.
+
+**Never driven (1).** `if running == 100` in `ConnectionPool.run` — the
+concurrency valve. No test drives a hundred simultaneous pool events.
+
+**Real gaps, now covered** — see `PoolSurvivorTests`. Each is verified by
+applying the mutation and watching the test fail, because four of the five did
+not bite when first written:
+
+- the connection lookups in `rescheduleIdleTimer` and
+  `destroyBackingOffConnection`, where inverting `==` finds the first connection
+  that is *not* the one asked about. Invisible with one connection in the pool,
+  which is what every existing test had;
+- `isConnected && !isDraining` in the promotion search — relaxed to `||` it
+  promotes a connection that is on its way out;
+- `keepAlive.usedStreams < maxStreams` at a maximum of zero, which a server may
+  set mid-session;
+- `connections.count < minimum` on close, which relaxed to `<=` replaces a
+  connection the pool did not lose.
+
+**Already fixed before this triage (1).** The circuit-breaker threshold
+comparison, covered by the negative control described above.
+
+The lesson worth keeping: a survivor list is mostly noise, and reading it is the
+work. Three of the four real gaps were invisible to every existing test for the
+same reason — the tests used a pool with one connection in it.
