@@ -142,6 +142,27 @@ extension PoolStateMachine {
             self.id = id
         }
 
+
+        /// The streams still on offer for a connection carrying `used` of `max`,
+        /// saturating at zero rather than trapping.
+        ///
+        /// `max - used` must never be computed directly on these numbers. It
+        /// goes negative in two ordinary situations, and on `UInt16` negative is
+        /// an arithmetic overflow trap that takes the process down — no error, no
+        /// unwinding, no chance to reconnect:
+        ///
+        /// - a **draining** connection reports a maximum of zero while its
+        ///   outstanding streams are still counted;
+        /// - a server may **lower** its stream limit below what is already
+        ///   leased, which it is entitled to do at any point in a session.
+        ///
+        /// The second is peer-controlled, which is what makes this a safety
+        /// guard rather than a tidiness one: without it a server can crash its
+        /// client by revising a number downwards.
+        @inlinable
+        static func availableStreams(max: UInt16, used: UInt16) -> UInt16 {
+            max >= used ? max - used : 0
+        }
         @inlinable
         var isIdle: Bool {
             switch self.state {
@@ -452,7 +473,9 @@ extension PoolStateMachine {
             case .leased(let connection, let usedStreams, let maxStreams, let keepAlive):
                 precondition(usedStreams >= returnedStreams)
                 let newUsedStreams = usedStreams - returnedStreams
-                let availableStreams = maxStreams - (newUsedStreams + keepAlive.usedStreams)
+                let availableStreams = Self.availableStreams(
+                    max: maxStreams, used: newUsedStreams + keepAlive.usedStreams
+                )
                 if newUsedStreams == 0 {
                     self.state = .idle(connection, maxStreams: maxStreams, keepAlive: keepAlive, idleTimer: nil)
                     return .available(.idle(availableStreams: availableStreams, newIdle: true))
@@ -513,7 +536,9 @@ extension PoolStateMachine {
 
             case .leased(let connection, let usedStreams, let maxStreams, .running):
                 self.state = .leased(connection, usedStreams: usedStreams, maxStreams: maxStreams, keepAlive: .notScheduled)
-                return .leased(availableStreams: maxStreams - usedStreams)
+                return .leased(
+                    availableStreams: Self.availableStreams(max: maxStreams, used: usedStreams)
+                )
 
             case .draining, .closing, .closed:
                 return nil
@@ -549,7 +574,9 @@ extension PoolStateMachine {
                 return .closeConnection(closeAction)
 
             case .leased(let connection, let usedStreams, let maxStreams, let keepAlive):
-                let availableStreams = maxStreams - usedStreams - keepAlive.usedStreams
+                let availableStreams = Self.availableStreams(
+                    max: maxStreams, used: usedStreams + keepAlive.usedStreams
+                )
                 self.state = .draining(connection, usedStreams: usedStreams)
                 return .markedForClose(availableStreams: availableStreams, keepAliveWasRunning: keepAlive.isRunning)
 
@@ -648,6 +675,28 @@ extension PoolStateMachine {
             var maxStreams: UInt16
             @usableFromInline
             var runningKeepAlive: Bool
+
+            /// The available streams this connection was contributing, saturating
+            /// at zero.
+            ///
+            /// `maxStreams - usedStreams` must not be computed directly. It goes
+            /// negative in two ordinary situations, and on `UInt16` negative is
+            /// not a small number — it is an arithmetic overflow trap, which
+            /// takes the whole process down:
+            ///
+            /// - a **draining** connection reports a maximum of zero while its
+            ///   outstanding streams are still counted, so the subtraction is
+            ///   `0 - n` for every stream still on it;
+            /// - a server may **lower** its stream limit below what is already
+            ///   leased, which it is entitled to do at any point in a session.
+            ///
+            /// The second is peer-controlled, so the guard is not a tidiness
+            /// measure — without it a server can crash its client by revising a
+            /// number downwards.
+            @usableFromInline
+            var availableStreams: UInt16 {
+                ConnectionState.availableStreams(max: self.maxStreams, used: self.usedStreams)
+            }
 
 
             @inlinable

@@ -160,7 +160,23 @@ extension PoolStateMachine {
 
         @inlinable
         mutating func createNewDemandConnectionIfPossible() -> ConnectionRequest? {
-            precondition(self.minimumConcurrentConnections <= self.stats.active)
+            // No `precondition(minimumConcurrentConnections <= stats.active)` here,
+            // although upstream has one. It asserts an invariant the pool does
+            // not maintain, because the two halves measure different things:
+            // this counts `stats.active`, which excludes closing connections,
+            // while the refill that restores the minimum triggers on
+            // `connections.count`, which includes them.
+            //
+            // So for the whole window between a connection beginning to close
+            // and reporting closed, a pool at its minimum has `active` one below
+            // it and no refill under way — and any lease arriving in that window
+            // that needs a new connection trips the assertion and takes the
+            // process down. The window is entirely ordinary: a keep-alive fails,
+            // or a driver reports its channel going away, and a request arrives
+            // before the socket has finished closing.
+            //
+            // Creating the connection is the right thing to do there. The pool
+            // wants one, and it is below the count it is trying to hold.
             guard self.maximumConcurrentConnectionSoftLimit > self.stats.active else {
                 return nil
             }
@@ -409,7 +425,7 @@ extension PoolStateMachine {
                 self.stats.idle -= 1
                 self.stats.closing += 1
                 self.stats.runningKeepAlive -= closeAction.runningKeepAlive ? 1 : 0
-                self.stats.availableStreams -= closeAction.maxStreams - closeAction.usedStreams
+                self.stats.availableStreams -= closeAction.availableStreams
                 self.stats.leasedStreams -= closeAction.usedStreams // keep alive may use streams
 
                 // If the closing connection occupies a persisted or demand slot, try to
@@ -581,7 +597,7 @@ extension PoolStateMachine {
             }
 
             self.stats.runningKeepAlive -= closeAction.runningKeepAlive ? 1 : 0
-            self.stats.availableStreams -= closeAction.maxStreams - closeAction.usedStreams
+            self.stats.availableStreams -= closeAction.availableStreams
 
             switch closeAction.previousConnectionState {
             case .idle:
@@ -630,7 +646,7 @@ extension PoolStateMachine {
             self.stats.idle -= 1
             self.stats.closing += 1
             self.stats.runningKeepAlive -= closeAction.runningKeepAlive ? 1 : 0
-            self.stats.availableStreams -= closeAction.maxStreams - closeAction.usedStreams
+            self.stats.availableStreams -= closeAction.availableStreams
             self.stats.leasedStreams -= closeAction.usedStreams // a keep alive may use a stream even while idle
 
             return CloseAction(
@@ -653,7 +669,7 @@ extension PoolStateMachine {
             }
 
             self.stats.runningKeepAlive -= closeAction.runningKeepAlive ? 1 : 0
-            self.stats.availableStreams -= closeAction.maxStreams - closeAction.usedStreams
+            self.stats.availableStreams -= closeAction.availableStreams
 
             switch closeAction.previousConnectionState {
             case .idle:
