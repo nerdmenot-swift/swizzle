@@ -72,7 +72,7 @@ is absent, zero, enormous, or smaller than a value derived from it earlier?
 | SwizzleMySQL | 85.2% | 82.3% |
 | SwizzlePostgresDriver | 86.6% | **unknown** |
 | SwizzleSQLite | 85.2% | **unknown** |
-| SwizzleQuery | 66.0% | **unknown** |
+| SwizzleQuery | 66.0% | 53.6% (filter reaching 56% of the module) |
 | SwizzleMySQLEngine | 69.6% | **unknown** |
 
 A mutation score of "unknown" is the interesting cell. Coverage says the lines

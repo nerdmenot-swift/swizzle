@@ -156,6 +156,19 @@ extension SelectQuery {
         _ type: T.Type, _ row: SQLRow, _ index: inout Int
     ) throws -> T {
         defer { index += 1 }
+        // A row and the description it arrived with are not always the same
+        // width: a server can send a short row, a driver can hand one back
+        // after an error, a result set can be truncated mid-stream. Past this
+        // point is a direct subscript, so without the check a narrow row is an
+        // out-of-bounds read rather than a decode failure.
+        //
+        // Three of the seven copies of this decoder had the guard and four did
+        // not. The Postgres driver notes in `Row.swift` that its query state
+        // machine genuinely produces rows narrower than their description, so
+        // this is reachable rather than defensive.
+        guard index < row.values.count else {
+            throw SQLDecodeError(expected: "\(T.self) at column \(index)", actual: .null)
+        }
         return try T(sqlValue: row.values[index])
     }
 }
