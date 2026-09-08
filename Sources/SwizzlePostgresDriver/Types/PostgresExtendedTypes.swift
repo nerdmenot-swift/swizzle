@@ -370,7 +370,17 @@ extension PostgresExtendedTypes {
     ///
     /// Confirmed against `pgx/pgtype/tsvector.go`.
     static func decodeTSVector(_ buffer: inout ByteBuffer) -> SQLValue? {
-        guard let count: UInt32 = buffer.readInteger(), count < 1_000_000 else { return nil }
+        // Bounded by the buffer, not by a round number. Each lexeme carries at
+        // least a NUL-terminated word and a two-byte position count, so three
+        // bytes is the floor — a header claiming more than that allows is
+        // malformed rather than large. The fixed million this replaces let a
+        // five-byte message reserve room for a million strings; its siblings in
+        // this file were given buffer-derived bounds earlier and this one was
+        // missed, which is the whole argument for auditing by class rather than
+        // by crash report.
+        guard let count: UInt32 = buffer.readInteger(),
+              Int(count) <= buffer.readableBytes / 3
+        else { return nil }
 
         var lexemes: [String] = []
         lexemes.reserveCapacity(Int(count))
@@ -386,6 +396,8 @@ extension PostgresExtendedTypes {
                 continue
             }
 
+            // Two bytes per position, so the buffer bounds this too.
+            guard Int(positionCount) * 2 <= buffer.readableBytes else { return nil }
             var positions: [String] = []
             positions.reserveCapacity(Int(positionCount))
             for _ in 0..<positionCount {
@@ -448,7 +460,9 @@ extension PostgresExtendedTypes {
         guard let count: UInt32 = buffer.readInteger() else { return nil }
         // The empty query prints as nothing at all.
         guard count > 0 else { return .text("") }
-        guard count < 1_000_000 else { return nil }
+        // Every item carries at least a one-byte kind tag, so the buffer bounds
+        // the count. See `decodeTSVector` for why this is not a fixed number.
+        guard Int(count) <= buffer.readableBytes else { return nil }
 
         var items: [TSQueryItem] = []
         items.reserveCapacity(Int(count))

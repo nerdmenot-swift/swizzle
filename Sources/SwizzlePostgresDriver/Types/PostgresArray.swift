@@ -141,7 +141,30 @@ public enum PostgresArrayDecoder {
                 let parts = range.split(separator: ":")
                 guard parts.count == 2, let lower = Int32(parts[0]), let upper = Int32(parts[1])
                 else { return nil }
-                declaredBounds.append(.init(length: upper - lower + 1, lowerBound: lower))
+
+                // The two bounds are independent values parsed out of a string
+                // the server chose, and nothing in the format constrains them
+                // against each other. `[-2147483648:2147483647]` overflows the
+                // subtraction and traps; `[5:3]` yields a negative length,
+                // which is not a small array but an invalid Range to iterate
+                // and a negative capacity to reserve.
+                let (span, spanOverflowed) = upper.subtractingReportingOverflow(lower)
+                guard !spanOverflowed else { return nil }
+                let (declaredLength, lengthOverflowed) = span.addingReportingOverflow(1)
+                guard !lengthOverflowed, declaredLength >= 0 else { return nil }
+
+                // And a length larger than the text could possibly describe is
+                // malformed rather than large. Every element needs at least one
+                // character, so the string itself is the bound — the same
+                // reasoning the binary decoder uses against `readableBytes`,
+                // which stops `reserveCapacity` further down being an
+                // allocation the peer picked. Without it `[0:2000000000]` is a
+                // sixteen-gigabyte reservation from a 24-byte string, and it
+                // would go unnoticed here: macOS overcommits and survives it,
+                // Linux aborts.
+                guard Int(declaredLength) <= characters.count else { return nil }
+
+                declaredBounds.append(.init(length: declaredLength, lowerBound: lower))
             }
             characters = Array(characters[(equals + 1)...])
         }

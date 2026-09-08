@@ -46,7 +46,10 @@ is absent, zero, enormous, or smaller than a value derived from it earlier?
 | Connection pool stream counts | verified | bounds review + `PoolStreamAccountingTests` | found 5 traps + 1 false assertion |
 | MySQL binlog column metadata | verified | bounds review + `BinlogDecimalMetadataTests` | found 2 crashes: DECIMAL `scale > precision` |
 | MySQL driver arithmetic elsewhere | partial | bounds review | wire lengths and binlog metadata read; the rest of the driver not yet |
-| **Postgres driver arithmetic on peer values** | **unverified** | — | the audit has not been pointed here |
+| Postgres array bounds, text format | verified | bounds review + `PostgresArrayTextBoundsTests` | found an `Int32` overflow crash and 3 unbounded lengths |
+| Postgres array bounds, binary format | verified | bounds review + `MalformedInputTests` | dimension product, element count |
+| **Postgres `reserveCapacity` sizing** | **unverified** | hardened, but untested | the decoder returns nil either way, so no assertion distinguishes bounded from unbounded. See `PostgresCountBoundsTests` |
+| Postgres NUMERIC / bit / geometry decoding | partial | bounds review | read and found bounded; no dedicated hostile-input tests |
 
 ### Correctness of values on the wire
 
