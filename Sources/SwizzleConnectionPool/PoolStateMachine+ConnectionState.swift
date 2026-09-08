@@ -315,7 +315,7 @@ extension PoolStateMachine {
 
                 if scheduleIdleTimeoutTimer {
                     idleTimerState = self._nextTimer()
-                    idleTimer = ConnectionTimer(timerID: idleTimerState!.timerID, connectionID: self.id, usecase: .keepAlive)
+                    idleTimer = ConnectionTimer(timerID: idleTimerState!.timerID, connectionID: self.id, usecase: .idleTimeout)
                 }
                 self.state = .idle(connection, maxStreams: maxStreams, keepAlive: .scheduled(keepAliveTimer), idleTimer: idleTimerState)
                 return Max2Sequence(idleTimer, nil)
@@ -323,7 +323,7 @@ extension PoolStateMachine {
             case .idle(let connection, let maxStreams, keepAlive: .running(let usingStream), idleTimer: .none):
                 if scheduleIdleTimeoutTimer {
                     idleTimerState = self._nextTimer()
-                    idleTimer = ConnectionTimer(timerID: idleTimerState!.timerID, connectionID: self.id, usecase: .keepAlive)
+                    idleTimer = ConnectionTimer(timerID: idleTimerState!.timerID, connectionID: self.id, usecase: .idleTimeout)
                 }
                 self.state = .idle(connection, maxStreams: maxStreams, keepAlive: .running(usingStream), idleTimer: idleTimerState)
                 return Max2Sequence(keepAliveTimer, idleTimer)
