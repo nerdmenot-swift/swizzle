@@ -66,7 +66,12 @@ final class MockConnection: PooledConnection, @unchecked Sendable {
 /// only observable through *what the waiter is told*. A shutdown that resumes
 /// its waiters with `.poolShutdown` and one that strands them look identical
 /// from the state machine's own state.
-final class MockRequest: ConnectionRequestProtocol, @unchecked Sendable {
+///
+/// `Equatable` by id, matching what `RequestAction`'s own equality compares, so
+/// a test can assert on a whole action instead of destructuring it.
+final class MockRequest: ConnectionRequestProtocol, Equatable, @unchecked Sendable {
+    static func == (lhs: MockRequest, rhs: MockRequest) -> Bool { lhs.id == rhs.id }
+
     typealias ID = Int
     typealias Connection = MockConnection
 

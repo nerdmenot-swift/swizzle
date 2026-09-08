@@ -794,7 +794,22 @@ extension PoolStateMachine {
                 self.stats.runningKeepAlive -= 1
             }
             self.stats.leasedStreams -= closedAction.usedStreams
-            self.stats.availableStreams -= closedAction.maxStreams - closedAction.usedStreams
+            // **Saturating, because a draining connection reports `maxStreams: 0`.**
+            //
+            // `markForClose` on a *leased* connection has already subtracted that
+            // connection's available streams, so `closed()` reports zero to stop
+            // this line subtracting them twice. With `usedStreams` still non-zero,
+            // `maxStreams - usedStreams` is `0 - 1` on a `UInt16` — an arithmetic
+            // overflow, which is a trap and not a wrong number.
+            //
+            // Reaching it takes only what a restarting server does: announce a
+            // close on a connection somebody is using, then drop it before they
+            // release. Both halves come from the peer, and the pool crashes the
+            // client process.
+            let availableToRemove = closedAction.maxStreams >= closedAction.usedStreams
+                ? closedAction.maxStreams - closedAction.usedStreams
+                : 0
+            self.stats.availableStreams -= availableToRemove
 
             switch closedAction.previousConnectionState {
             case .idle:
