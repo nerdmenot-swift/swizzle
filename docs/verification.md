@@ -44,8 +44,9 @@ is absent, zero, enormous, or smaller than a value derived from it earlier?
 | Postgres malformed input | verified | bounds review + `MalformedInputTests` | array dimensions, extended types |
 | SQLite argument bounds | verified | bounds review + `SQLiteBoundsTests` | blob size, busy timeout |
 | Connection pool stream counts | verified | bounds review + `PoolStreamAccountingTests` | found 5 traps + 1 false assertion |
-| **MySQL driver arithmetic on peer values** | **unverified** | — | the pool audit has not been pointed here |
-| **Postgres driver arithmetic on peer values** | **unverified** | — | same |
+| MySQL binlog column metadata | verified | bounds review + `BinlogDecimalMetadataTests` | found 2 crashes: DECIMAL `scale > precision` |
+| MySQL driver arithmetic elsewhere | partial | bounds review | wire lengths and binlog metadata read; the rest of the driver not yet |
+| **Postgres driver arithmetic on peer values** | **unverified** | — | the audit has not been pointed here |
 
 ### Correctness of values on the wire
 
@@ -59,7 +60,7 @@ is absent, zero, enormous, or smaller than a value derived from it earlier?
 
 | module | region coverage | mutation score |
 |---|---|---|
-| SwizzleConnectionPool | 85.6% | in progress |
+| SwizzleConnectionPool | 85.6% | 70.0% |
 | SwizzleMySQL | 85.2% | 82.3% |
 | SwizzlePostgresDriver | 86.6% | **unknown** |
 | SwizzleSQLite | 85.2% | **unknown** |
@@ -111,3 +112,26 @@ find Tests -name '*Oracle*.swift' -o -name '*Grounding*.swift'
 # Compile-time gates
 ./Scripts/negative-tests.sh
 ```
+
+## Caveats on the numbers above
+
+**Mutation scores count timeouts as kills.** A mutant that hangs is recorded as
+killed, which is usually right — a hang is a test noticing — but not always. The
+`SwizzleConnectionPool` run had 6 such out of 98, so the true score is somewhere
+in `[63.6%, 70.0%]`. An earlier sweep reported 90.3% almost entirely on
+timeouts, because its bound was shorter than the suite itself; the bound is now
+derived from a measured baseline, which is why this one is believable.
+
+**A survivor is not automatically a gap.** Of the 42 in that run, 9 mutate a
+`#elseif` compile condition in vendored NIO code and cannot change the built
+binary. One mutates `max >= used ? max - used : 0` to `>` — at `max == used`
+both yield zero, so it is an equivalent mutant, not a hole.
+
+But one was real, and is the reason this section exists: every circuit-breaker
+test set the trip threshold to zero so the trip was reachable without waiting,
+which meant the whole suite agreed with a pool that ignored the threshold
+entirely. Mutating the comparison left it green. There is now a negative control
+that fails when the threshold is ignored, checked by ignoring it on purpose.
+
+That is the failure mode this whole file is about, in miniature: eight passing
+tests about a feature, none of which could tell whether half of it worked.

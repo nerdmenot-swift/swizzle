@@ -286,6 +286,25 @@ public enum MySQLBinlogRowDecoder {
             // result is the exact decimal.
             let precision = Int(metadata >> 8)
             let scale = Int(metadata & 0xFF)
+
+            // `precision` and `scale` are two independent bytes of one metadata
+            // word, so nothing on the wire prevents `scale > precision`. A
+            // DECIMAL with more fractional digits than digits is not a number
+            // with an odd value; it is a malformed column definition, and there
+            // is nothing it could sensibly decode to. So this rejects rather
+            // than clamps.
+            //
+            // It has to be rejected *here* because the arithmetic downstream is
+            // not defensive: `precision - scale` goes negative, and the byte
+            // count helper then evaluates `leftover[integerDigits % 9]`, which
+            // for a negative remainder is an out-of-bounds read. That is on the
+            // decode path for any row event a peer sends.
+            guard scale <= precision else {
+                throw MySQLProtocolError.malformedPacket(
+                    "binlog: DECIMAL scale \(scale) is greater than precision \(precision)"
+                )
+            }
+
             let packed = try need(decimalByteCount(precision: precision, scale: scale))
             return .bytes(Array(decodeDecimal(packed, precision: precision, scale: scale).utf8))
 
@@ -442,13 +461,17 @@ public enum MySQLBinlogRowDecoder {
     /// complemented, which is why the whole buffer is normalised up front.
     static func decodeDecimal(_ packed: [UInt8], precision: Int, scale: Int) -> String {
         guard !packed.isEmpty else { return "0" }
+        // Clamped, not trusted: the caller rejects scale > precision, but these
+        // helpers are reachable on their own and a negative digit count here is
+        // an invalid Range rather than a wrong answer.
+        let scale = Swift.max(0, scale)
 
         var bytes = packed
         let isNegative = (bytes[0] & 0x80) == 0
         bytes[0] ^= 0x80                                   // undo the sign-bit flip
         if isNegative { for i in bytes.indices { bytes[i] = ~bytes[i] } }
 
-        let integerDigits = precision - scale
+        let integerDigits = Swift.max(0, precision - scale)
         let leftover = [0, 1, 1, 2, 2, 3, 3, 4, 4, 4]
         var offset = 0
 
@@ -560,7 +583,10 @@ public enum MySQLBinlogRowDecoder {
     /// DECIMAL packs nine digits into every four bytes, with a partial group at
     /// each end.
     static func decimalByteCount(precision: Int, scale: Int) -> Int {
-        let integerDigits = precision - scale
+        // See `decodeDecimal`: clamped so a malformed metadata word cannot turn
+        // `leftover[integerDigits % 9]` into a negative index.
+        let scale = Swift.max(0, scale)
+        let integerDigits = Swift.max(0, precision - scale)
         let integerGroups = integerDigits / 9
         let fractionalGroups = scale / 9
         let leftover = [0, 1, 1, 2, 2, 3, 3, 4, 4, 4]

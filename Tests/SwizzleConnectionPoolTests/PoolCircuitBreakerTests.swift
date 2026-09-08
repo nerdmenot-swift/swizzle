@@ -265,4 +265,63 @@ struct PoolCircuitBreakerTests {
             "got \(String(describing: arrival.failure))"
         )
     }
+
+    // MARK: - The threshold is actually consulted
+
+    /// **The breaker does not trip before its threshold has elapsed.**
+    ///
+    /// Every other test in this suite sets `circuitBreakerTripAfter` to zero so
+    /// the trip is reachable without waiting. That makes them all agree with a
+    /// pool that ignored the threshold entirely — mutation testing found exactly
+    /// that, by changing the comparison at `PoolStateMachine.swift:465` and
+    /// watching the whole suite stay green.
+    ///
+    /// So this is the negative control the others need: with the default
+    /// threshold, the same sequence of failures that trips the breaker above
+    /// must *not* trip it, and callers must keep waiting rather than being
+    /// failed. Without it, "the breaker trips after sustained failure" is only
+    /// half a claim — the half about sustained is untested.
+    ///
+    /// It cannot pin the boundary itself. Whether the comparison is `>` or `>=`
+    /// is only observable when the elapsed time equals the threshold exactly,
+    /// which needs a clock the test controls; `ContinuousClock` is not one, and
+    /// the pool takes its own readings. What this pins is the property that
+    /// matters: the threshold is consulted at all.
+    @Test("the breaker does not trip before its threshold has elapsed")
+    func breakerRespectsItsThreshold() {
+        var (machine, _) = makeStateMachine(
+            minimumConnections: 0, maximumSoftLimit: 1, maximumHardLimit: 1,
+            circuitBreakerTripAfter: .seconds(60)
+        )
+        let waiter = MockRequest(id: 1)
+        guard case .makeConnection(let first, _) = lease(waiter, from: &machine).connection else {
+            Issue.record("expected a connection attempt")
+            return
+        }
+
+        // The same two failures that trip the breaker when the threshold is
+        // zero. Sixty seconds have not passed, so they must not trip it here.
+        run(machine.connectionEstablishFailed(PoolTestError.refused, for: first).request)
+        guard case .makeConnection(let retry, _) =
+            machine.connectionCreationBackoffDone(first.connectionID).connection
+        else {
+            Issue.record("expected the connection to retry")
+            return
+        }
+        run(machine.connectionEstablishFailed(PoolTestError.refused, for: retry).request)
+
+        #expect(
+            waiter.failure == nil,
+            "the waiter was failed after \(String(describing: waiter.failure)) with 60s still to run"
+        )
+
+        // And a new arrival is queued rather than failed fast, which is the
+        // behaviour that distinguishes "still trying" from "given up".
+        let arrival = MockRequest(id: 2)
+        lease(arrival, from: &machine)
+        #expect(
+            arrival.failure == nil,
+            "a new caller was failed before the pool had given up"
+        )
+    }
 }
