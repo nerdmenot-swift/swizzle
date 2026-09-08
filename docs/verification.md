@@ -45,7 +45,9 @@ is absent, zero, enormous, or smaller than a value derived from it earlier?
 | SQLite argument bounds | verified | bounds review + `SQLiteBoundsTests` | blob size, busy timeout |
 | Connection pool stream counts | verified | bounds review + `PoolStreamAccountingTests` | found 5 traps + 1 false assertion |
 | MySQL binlog column metadata | verified | bounds review + `BinlogDecimalMetadataTests` | found 2 crashes: DECIMAL `scale > precision` |
-| MySQL driver arithmetic elsewhere | partial | bounds review | wire lengths and binlog metadata read; the rest of the driver not yet |
+| MySQL compression | verified | bounds review + `CompressionBoundsTests` | found a decompression bomb on the binlog path |
+| MySQL handshake, auth, binary temporal | verified | bounds review | signed auth-data length, `xor` length mismatch, `UInt8`-bounded temporal slices — all already guarded |
+| MySQL prepare / result state machines | verified | bounds review | counts held as `Int`, so the decrements cannot trap |
 | Postgres array bounds, text format | verified | bounds review + `PostgresArrayTextBoundsTests` | found an `Int32` overflow crash and 3 unbounded lengths |
 | Postgres array bounds, binary format | verified | bounds review + `MalformedInputTests` | dimension product, element count |
 | **Postgres `reserveCapacity` sizing** | **unverified** | hardened, but untested | the decoder returns nil either way, so no assertion distinguishes bounded from unbounded. See `PostgresCountBoundsTests` |

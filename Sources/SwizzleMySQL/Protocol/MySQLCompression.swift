@@ -110,6 +110,27 @@ public enum MySQLCompression {
     public static func decompress(_ source: [UInt8], expectedCount: Int) throws -> [UInt8] {
         guard expectedCount > 0 else { return [] }
 
+        // DEFLATE cannot expand by more than 1032:1. That is the format ceiling,
+        // not a policy limit — a stream of maximally back-referenced blocks is
+        // the best it can do — so a declared size above it did not come from a
+        // zlib compressor and the packet is malformed rather than large.
+        //
+        // The check belongs here, before the allocation, because the buffer is
+        // sized from the *declared* count and filled afterwards. Without it the
+        // binlog tail decoder hands over a length field of up to four bytes with
+        // no bound of its own: ten bytes of payload claiming 0xFFFFFFFF asks for
+        // a 4.29 GB zeroed allocation, and zlib only rejects it afterwards.
+        //
+        // The connection-level compression path is separately bounded by
+        // `maxAllowedPacket`; this covers the binlog path, which is not, and
+        // tightens both.
+        guard expectedCount <= source.count * 1032 else {
+            throw MySQLProtocolError.malformedPacket(
+                "compressed packet claims \(expectedCount) bytes from \(source.count), "
+                    + "beyond what DEFLATE can produce"
+            )
+        }
+
         var destinationCount = uLongf(expectedCount)
         var destination = [UInt8](repeating: 0, count: expectedCount)
 
