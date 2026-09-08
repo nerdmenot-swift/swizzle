@@ -182,4 +182,53 @@ struct PoolSequenceTests {
         let max2 = Max2Sequence(1, 2)
         #expect(Array(max2) == Array(max2))
     }
+
+    // MARK: - The general representation
+
+    /// **Three or more elements from a non-array collection.** `TinyFastSequence`
+    /// stores nothing, one, or two elements inline and falls back to an array
+    /// beyond that — and the fallback has two paths: an `Array` source is
+    /// adopted as-is, anything else is copied. Only the first was exercised,
+    /// because every caller in the module passes an array.
+    ///
+    /// A `Set` is a fair stand-in for the other path: no integer indices, no
+    /// contiguous storage, and an order of its own.
+    @Test("three or more elements from a non-array collection are all carried")
+    func generalRepresentationFromNonArray() {
+        let source: Set<Int> = [10, 20, 30, 40]
+        let sequence = TinyFastSequence(source)
+
+        #expect(sequence.count == 4)
+        #expect(Set(sequence) == source, "every element survived the copy")
+    }
+
+    /// A range is the other shape worth checking: a collection with no storage
+    /// at all behind it.
+    @Test("three or more elements from a computed collection are all carried")
+    func generalRepresentationFromRange() {
+        let sequence = TinyFastSequence(1..<6)
+        #expect(sequence.count == 5)
+        #expect(Array(sequence) == [1, 2, 3, 4, 5])
+    }
+
+    /// An array source takes the other branch — adopted rather than copied —
+    /// and must agree element for element with the copying one.
+    @Test("an array source and a copied source agree")
+    func generalRepresentationAgreesAcrossSources() {
+        let elements = [1, 2, 3, 4, 5]
+        #expect(Array(TinyFastSequence(elements)) == Array(TinyFastSequence(elements[...])))
+    }
+
+    /// The array-literal form has the same size split, and its own general
+    /// branch. Three elements is the smallest literal that reaches it.
+    @Test("an array literal of three or more elements carries them all")
+    func generalRepresentationFromLiteral() {
+        let sequence: TinyFastSequence<Int> = [1, 2, 3, 4]
+        #expect(sequence.count == 4)
+        #expect(Array(sequence) == [1, 2, 3, 4])
+        #expect(
+            Array(sequence) == Array(TinyFastSequence([1, 2, 3, 4])),
+            "the literal and the initialiser agree past the inline sizes too"
+        )
+    }
 }

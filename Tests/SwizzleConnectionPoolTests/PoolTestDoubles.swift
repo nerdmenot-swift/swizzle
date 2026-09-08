@@ -132,7 +132,8 @@ func makeStateMachine(
     maximumHardLimit: Int = 4,
     keepAlive: Duration? = nil,
     idleTimeout: Duration = .seconds(30),
-    circuitBreakerTripAfter: Duration = .seconds(60)
+    circuitBreakerTripAfter: Duration = .seconds(60),
+    maximumConcurrentConnectionRequests: Int = 20
 ) -> (machine: TestStateMachine, refill: [TestStateMachine.ConnectionRequest]) {
     var configuration = PoolConfiguration()
     configuration.minimumConnectionCount = minimumConnections
@@ -141,6 +142,7 @@ func makeStateMachine(
     configuration.keepAliveDuration = keepAlive
     configuration.idleTimeoutDuration = idleTimeout
     configuration.circuitBreakerTripAfter = circuitBreakerTripAfter
+    configuration.maximumConcurrentConnectionRequests = maximumConcurrentConnectionRequests
 
     var machine = TestStateMachine(
         configuration: configuration,

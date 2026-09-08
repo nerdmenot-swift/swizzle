@@ -162,4 +162,35 @@ struct LockTests {
         lock.unlock()
         #expect(lock.withLock { value } == 1)
     }
+
+    /// The raw mutex, which the lock hands out so it can be used with a
+    /// condition variable — a pthread condvar has to wait on the *same* mutex
+    /// the lock uses, so this only works if the pointer is stable and really is
+    /// the lock's own. Nothing in this module needs it yet, so nothing had ever
+    /// checked either property.
+    @Test("the raw primitive is stable and is the lock's own")
+    func lockPrimitiveIsStable() {
+        let lock = NIOLock()
+        let first = lock.withLockPrimitive { UInt(bitPattern: $0) }
+        let second = lock.withLockPrimitive { UInt(bitPattern: $0) }
+        #expect(first == second, "a fresh mutex each call would be useless to a condvar")
+
+        let other = NIOLock()
+        #expect(
+            other.withLockPrimitive { UInt(bitPattern: $0) } != first,
+            "two locks must not share one mutex"
+        )
+        #expect(lock.withLock { true }, "and handing out the primitive did not take the lock")
+    }
+
+    /// Reaching the primitive throws through cleanly, without leaving the lock
+    /// in a state that blocks the next caller.
+    @Test("a throwing body over the raw primitive propagates and leaves the lock usable")
+    func lockPrimitiveThrows() {
+        let lock = NIOLock()
+        #expect(throws: Boom.self) {
+            try lock.withLockPrimitive { _ in throw Boom() }
+        }
+        #expect(lock.withLock { true })
+    }
 }
