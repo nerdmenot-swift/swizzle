@@ -460,3 +460,11 @@ jobs:
       # by compiling snippets out of band and asserting they fail.
       - name: Capability gating must be compile-time
         run: ./Scripts/negative-tests.sh
+
+      # A pool test that reads `MockRequest.result` after driving the state
+      # machine directly is reading nil forever, because the machine returns
+      # actions and never resumes a caller. Such a test cannot fail: `== nil`
+      # passes vacuously and anything else fails for reasons that look like pool
+      # bugs. Four were doing exactly that before this script existed.
+      - name: Pool tests must be able to fail
+        run: ./Scripts/pool-test-lint.sh

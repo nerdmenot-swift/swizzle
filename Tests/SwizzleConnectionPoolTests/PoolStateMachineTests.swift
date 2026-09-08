@@ -374,19 +374,7 @@ struct PoolStateMachineTests {
         // The bound is one iteration per waiter plus slack; if the loop needed
         // more than that, the queue would not be draining at all.
         for _ in 0..<(waiting.count + 2) where waiting.contains(where: { $0.result == nil }) {
-            let released = machine.releaseConnection(connection, streams: 1)
-            switch released.request {
-            case .failRequests(let failed, let error):
-                for request in failed { request.complete(with: .failure(error)) }
-            case .failRequest(let failed, let error):
-                failed.complete(with: .failure(error))
-            case .leaseConnection(let requests, let leased):
-                for request in requests {
-                    request.complete(with: .success(ConnectionLease(connection: leased) { _ in }))
-                }
-            case .none:
-                break
-            }
+            run(machine.releaseConnection(connection, streams: 1).request)
         }
 
         #expect(
