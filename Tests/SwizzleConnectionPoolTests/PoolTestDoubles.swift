@@ -131,7 +131,8 @@ func makeStateMachine(
     maximumSoftLimit: Int = 4,
     maximumHardLimit: Int = 4,
     keepAlive: Duration? = nil,
-    idleTimeout: Duration = .seconds(30)
+    idleTimeout: Duration = .seconds(30),
+    circuitBreakerTripAfter: Duration = .seconds(60)
 ) -> (machine: TestStateMachine, refill: [TestStateMachine.ConnectionRequest]) {
     var configuration = PoolConfiguration()
     configuration.minimumConnectionCount = minimumConnections
@@ -139,6 +140,7 @@ func makeStateMachine(
     configuration.maximumConnectionHardLimit = maximumHardLimit
     configuration.keepAliveDuration = keepAlive
     configuration.idleTimeoutDuration = idleTimeout
+    configuration.circuitBreakerTripAfter = circuitBreakerTripAfter
 
     var machine = TestStateMachine(
         configuration: configuration,
@@ -148,4 +150,43 @@ func makeStateMachine(
     )
     let refill = machine.refillConnections()
     return (machine, refill)
+}
+
+// MARK: - Running a request action
+
+/// Performs a `RequestAction` the way `ConnectionPool` does.
+///
+/// The state machine only ever *decides* what happens to a request — it returns
+/// `.leaseConnection` or `.failRequest` and moves on. Resuming the caller is the
+/// pool's job. So a test that reads `MockRequest.result` without running the
+/// action is reading `nil` forever: every `== nil` assertion passes vacuously
+/// and every other one fails, for reasons that look like bugs in the pool.
+///
+/// Running the action here mirrors `ConnectionPool.runRequestAction` and keeps
+/// the two halves honest.
+@discardableResult
+func run(_ action: TestStateMachine.RequestAction) -> TestStateMachine.RequestAction {
+    switch action {
+    case .leaseConnection(let requests, let connection):
+        for request in requests {
+            request.complete(with: .success(ConnectionLease(connection: connection) { _ in }))
+        }
+    case .failRequest(let request, let error):
+        request.complete(with: .failure(error))
+    case .failRequests(let requests, let error):
+        for request in requests { request.complete(with: .failure(error)) }
+    case .none:
+        break
+    }
+    return action
+}
+
+/// Leases through the machine and performs the resulting request action.
+@discardableResult
+func lease(
+    _ request: MockRequest, from machine: inout TestStateMachine
+) -> TestStateMachine.Action {
+    let action = machine.leaseConnection(request)
+    run(action.request)
+    return action
 }

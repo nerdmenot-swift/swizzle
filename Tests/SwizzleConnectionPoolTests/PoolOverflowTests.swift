@@ -96,7 +96,7 @@ struct PoolOverflowTests {
     func beyondHardLimitQueues() {
         var (machine, _) = Self.saturated()
         let extra = MockRequest(id: 99)
-        let action = machine.leaseConnection(extra)
+        let action = lease(extra, from: &machine)
         switch action.connection {
         case .makeConnection, .makeConnectionsCancelAndScheduleTimers:
             Issue.record("opened a connection past the hard limit")

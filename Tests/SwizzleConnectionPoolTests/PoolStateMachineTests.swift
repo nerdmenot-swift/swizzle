@@ -80,7 +80,7 @@ struct PoolStateMachineTests {
         var (machine, _) = makeStateMachine()
 
         let request = MockRequest(id: 1)
-        let leaseAction = machine.leaseConnection(request)
+        let leaseAction = lease(request, from: &machine)
         guard case .makeConnection(let connectionRequest, _) = leaseAction.connection else {
             Issue.record("expected makeConnection, got \(leaseAction.connection)")
             return
@@ -89,6 +89,7 @@ struct PoolStateMachineTests {
         let action = machine.connectionEstablishFailed(
             PoolTestError.refused, for: connectionRequest
         )
+        run(action.request)
         guard case .scheduleTimers(let timers) = action.connection else {
             Issue.record("expected a backoff timer, got \(action.connection)")
             return

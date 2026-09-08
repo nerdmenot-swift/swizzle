@@ -133,7 +133,7 @@ struct PoolOutageTests {
             minimumConnections: 0, maximumSoftLimit: 1, maximumHardLimit: 1
         )
         let waiter = MockRequest(id: 1)
-        let action = machine.leaseConnection(waiter)
+        let action = lease(waiter, from: &machine)
         guard case .makeConnection(let request, _) = action.connection else {
             Issue.record("expected makeConnection")
             return
@@ -145,8 +145,9 @@ struct PoolOutageTests {
         // retry, not the attempt that already failed.
         var attempt = request
         for _ in 0..<3 {
-            _ = machine.connectionEstablishFailed(PoolTestError.refused, for: attempt)
+            run(machine.connectionEstablishFailed(PoolTestError.refused, for: attempt).request)
             let retry = machine.connectionCreationBackoffDone(attempt.connectionID)
+            run(retry.request)
             switch retry.connection {
             case .makeConnection(let next, _):
                 attempt = next
@@ -207,11 +208,12 @@ struct PoolOutageTests {
         _ = machine.connectionEstablished(connection, maxStreams: 1)
 
         // Take the connection, then queue a request behind it.
-        _ = machine.leaseConnection(MockRequest(id: 1))
+        lease(MockRequest(id: 1), from: &machine)
         let queued = MockRequest(id: 2)
-        _ = machine.leaseConnection(queued)
+        lease(queued, from: &machine)
 
         let action = machine.connectionIdleTimerTriggered(connection.id)
+        run(action.request)
         if case .closeConnection(let closing, _) = action.connection {
             Issue.record(
                 "closed connection \(closing.id) while a request was queued for it"
