@@ -79,6 +79,19 @@ struct PostgresMalformedInputTests {
         }
 
         _ = PostgresArrayDecoder.decodeBinary(bytes)
+
+        // Four decoders were absent from this sweep entirely. `decodeNumeric` is
+        // the one that matters: its four `Int16` headers are the widest
+        // peer-controlled arithmetic surface in the driver, and a DECIMAL
+        // metadata word of exactly this shape was a crash in the MySQL binlog
+        // decoder. Being absent from the sweep is why nobody looked.
+        var numeric = Self.buffer(bytes)
+        _ = PostgresValueDecoder.decodeNumeric(&numeric)
+        var tsquery = Self.buffer(bytes)
+        _ = PostgresExtendedTypes.decodeTSQuery(&tsquery)
+        var interval = Self.buffer(bytes)
+        _ = PostgresExtendedTypes.decodeInterval(&interval)
+        _ = PostgresExtendedTypes.decodeJSONPath(bytes)
     }
 
     // MARK: - Random input
@@ -202,6 +215,117 @@ struct PostgresMalformedInputTests {
             for length in 0...shape.count {
                 Self.runEveryDecoder(Array(shape.prefix(length)))
             }
+        }
+    }
+
+    // MARK: - NUMERIC headers, swept
+
+    /// **Every interesting combination of NUMERIC's four headers.**
+    ///
+    /// `decodeNumeric` reads four `Int16`s — digit count, weight, sign, display
+    /// scale — and derives loop bounds and string lengths from them. That is the
+    /// widest peer-controlled arithmetic surface in this driver, and it is the
+    /// exact analogue of the MySQL DECIMAL metadata word, where two independent
+    /// bytes with no constraint between them indexed a lookup table at a
+    /// negative offset.
+    ///
+    /// Random bytes reach this space only by luck: the values that matter are
+    /// the extremes and the boundaries around zero, and four independent
+    /// sixteen-bit fields make them vanishingly unlikely to co-occur. So this
+    /// walks the product of the interesting values directly.
+    ///
+    /// `weight` and `displayScale` are swept over a narrower set than the other
+    /// two, and the extremes are covered separately below. They only set loop
+    /// lengths, and a large one is legitimately expensive: `weight` is the power
+    /// of 10000 of the leading group, so a value with 131072 integer digits —
+    /// which Postgres permits — genuinely renders 32768 groups. Sweeping the
+    /// full product spent three minutes proving that repeatedly. The fields
+    /// where a bug would hide are the ones that go *negative*, and those are
+    /// swept in full.
+    @Test("no combination of NUMERIC headers traps the decoder")
+    func numericHeaderCombinations() {
+        let interesting: [Int16] = [.min, .min + 1, -2, -1, 0, 1, 9, 10, .max - 1, .max]
+        let loopBounds: [Int16] = [.min, -1, 0, 1, 9]
+        let bodies: [[UInt8]] = [
+            [],
+            [0x00, 0x01],
+            [UInt8](repeating: 0xFF, count: 8),
+        ]
+
+        for digitCount in interesting {
+            for weight in loopBounds {
+                for sign in interesting {
+                    for displayScale in loopBounds {
+                        for body in bodies {
+                            var bytes: [UInt8] = []
+                            for header in [digitCount, weight, sign, displayScale] {
+                                bytes.append(UInt8(truncatingIfNeeded: header >> 8))
+                                bytes.append(UInt8(truncatingIfNeeded: header))
+                            }
+                            bytes.append(contentsOf: body)
+
+                            var buffer = Self.buffer(bytes)
+                            // Any result is acceptable, including nil. Not
+                            // trapping and not looping forever is the property.
+                            _ = PostgresValueDecoder.decodeNumeric(&buffer)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The extremes of the two loop-length fields, which the sweep above leaves
+    /// out because they are slow rather than interesting. A handful is enough:
+    /// what could go wrong here is an overflow or a reversed range, and that
+    /// does not depend on running the combination four thousand times.
+    @Test("the extremes of NUMERIC weight and display scale do not trap")
+    func numericExtremeLoopBounds() {
+        let extremes: [Int16] = [.min, .max, .max - 1, 16383]
+        for weight in extremes {
+            for displayScale in extremes {
+                var bytes: [UInt8] = []
+                for header in [Int16(0), weight, Int16(0), displayScale] {
+                    bytes.append(UInt8(truncatingIfNeeded: header >> 8))
+                    bytes.append(UInt8(truncatingIfNeeded: header))
+                }
+                var buffer = Self.buffer(bytes)
+                _ = PostgresValueDecoder.decodeNumeric(&buffer)
+            }
+        }
+    }
+
+    /// **The control.** A real NUMERIC still decodes to its exact digits, so the
+    /// sweep above is not passing because the decoder gave up on everything.
+    ///
+    /// `1234.5` at weight 0 with one display digit: one base-10000 group holding
+    /// 1234, then one holding 5000, which renders as `.5` once truncated to the
+    /// display scale.
+    @Test("a well-formed NUMERIC still decodes exactly")
+    func wellFormedNumericDecodes() {
+        var buffer = Self.buffer([
+            0x00, 0x02,   // two digit groups
+            0x00, 0x00,   // weight 0 — the first group is the units
+            0x00, 0x00,   // sign: positive
+            0x00, 0x01,   // display scale 1
+            0x04, 0xD2,   // 1234
+            0x13, 0x88,   // 5000
+        ])
+        #expect(PostgresValueDecoder.decodeNumeric(&buffer) == "1234.5")
+    }
+
+    /// And the special signs, which carry no digits at all — a decoder that read
+    /// groups anyway would run off the end of a two-word buffer.
+    @Test("the NUMERIC special signs decode without reading digits")
+    func numericSpecialSigns() {
+        for (sign, expected) in [(0xC000, "NaN"), (0xD000, "Infinity"), (0xF000, "-Infinity")] {
+            var buffer = Self.buffer([
+                0x00, 0x00,
+                0x00, 0x00,
+                UInt8(sign >> 8), UInt8(sign & 0xFF),
+                0x00, 0x00,
+            ])
+            #expect(PostgresValueDecoder.decodeNumeric(&buffer) == expected)
         }
     }
 }

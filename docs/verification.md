@@ -51,7 +51,9 @@ is absent, zero, enormous, or smaller than a value derived from it earlier?
 | Postgres array bounds, text format | verified | bounds review + `PostgresArrayTextBoundsTests` | found an `Int32` overflow crash and 3 unbounded lengths |
 | Postgres array bounds, binary format | verified | bounds review + `MalformedInputTests` | dimension product, element count |
 | **Postgres `reserveCapacity` sizing** | **unverified** | hardened, but untested | the decoder returns nil either way, so no assertion distinguishes bounded from unbounded. See `PostgresCountBoundsTests` |
-| Postgres NUMERIC / bit / geometry decoding | partial | bounds review | read and found bounded; no dedicated hostile-input tests |
+| Postgres NUMERIC headers | verified | `MalformedInputTests` header sweep | 4 `Int16` fields; the negative-capable ones swept in full |
+| Postgres bit / geometry / range decoding | verified | `MalformedInputTests` fuzz + extreme lengths | already in the sweep |
+| Postgres tsquery / interval / jsonpath | verified | `MalformedInputTests` | were absent from the sweep entirely until now |
 
 ### Correctness of values on the wire
 
