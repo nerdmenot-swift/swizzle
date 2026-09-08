@@ -57,7 +57,8 @@ is absent, zero, enormous, or smaller than a value derived from it earlier?
 |---|---|---|---|
 | MySQL parameters, results, binlog, DECIMAL | verified | 4 differential oracle suites | see `Tests/SwizzleMySQLIntegrationTests/*Oracle*` |
 | Postgres parameters | partial | 2 oracle suites | narrower than MySQL's |
-| **SQLite value round-trip** | **unverified** | — | no differential oracle exists |
+| SQLite values, all six kinds | verified | `SQLiteValueOracleTests`, bound vs literal | 19 subjects x typeof/quote, plus 6 column affinities |
+| **SQLite signed zero** | **not testable** | — | SQLite exposes no expression that distinguishes -0.0 from 0.0; division by zero is NULL and printf renders both the same. Driver round-trip only |
 
 ### Coverage and checkedness
 
