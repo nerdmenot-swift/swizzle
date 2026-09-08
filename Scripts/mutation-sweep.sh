@@ -216,6 +216,33 @@ run_suite >/dev/null 2>&1 || { echo "baseline is RED — fix that first" >&2; ex
 baseline_elapsed=$((SECONDS - baseline_start))
 echo "  green in ${baseline_elapsed}s."
 
+# Does the chosen test filter actually reach the code being mutated?
+#
+# If it does not, every mutant survives and the run reports 0%% — which reads as
+# a catastrophic result about the code rather than a wrong argument. That has
+# happened three times: once against a test target that does not exist, and twice
+# against real targets that barely touch the module. A sweep is slow enough that
+# discovering it afterwards is expensive.
+#
+# Measured rather than assumed, because "the SQLite tests import the query
+# builder" turned out to mean 21%% of it.
+if command -v llvm-cov >/dev/null 2>&1; then
+  prof="$(find .build -name default.profdata 2>/dev/null | head -1)"
+  bin="$(find .build -name '*PackageTests*' -type f -perm -u+x ! -path '*dSYM*' 2>/dev/null | head -1)"
+  if [[ -n "$prof" && -n "$bin" ]]; then
+    reach="$(llvm-cov report "$bin" -instr-profile "$prof" 2>/dev/null \
+      | grep "$TARGET" | awk '{r+=$2; u+=$3} END {if (r>0) printf "%%.0f", 100*(r-u)/r; else print "0"}')"
+    echo "  the filter reaches ${reach}%% of $TARGET."
+    if [[ "$reach" -lt 25 ]]; then
+      echo
+      echo "  WARNING: that is very little of the target. A score near zero will"
+      echo "  say more about the test filter than about the code. Consider a"
+      echo "  filter that covers more, or no filter at all."
+      echo
+    fi
+  fi
+fi
+
 # Three times the baseline, floored at the old constant. A genuine hang runs
 # forever, so any generous multiple separates it from a slow build; the point is
 # only that the bound tracks the suite rather than a number someone typed once.
